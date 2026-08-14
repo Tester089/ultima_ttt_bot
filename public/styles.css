@@ -1,0 +1,223 @@
+:root {
+  --bg0: #0f1419;
+  --bg1: #172029;
+  --bg2: #1e2a36;
+  --border: rgba(255, 255, 255, 0.1);
+  --text: #e8eef4;
+  --muted: #93a4b5;
+  --x: #4ea1ff;
+  --o: #ff8a5c;
+  --live: #2a5f8f;
+  --live-bg: rgba(78, 161, 255, 0.22);
+  --ok: #3ecf8e;
+  --danger: #e35d6a;
+  --radius: 14px;
+  font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(78, 161, 255, 0.18), transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, rgba(255, 138, 92, 0.12), transparent 50%),
+    var(--bg0);
+  color: var(--text);
+}
+
+body {
+  padding: 12px 14px calc(16px + env(safe-area-inset-bottom));
+}
+
+.app {
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.brand {
+  font-size: 22px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.me {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.panel h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.lead {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.btn.primary {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  border-color: transparent;
+}
+
+.btn.danger {
+  background: rgba(227, 93, 106, 0.15);
+  border-color: rgba(227, 93, 106, 0.45);
+  color: #ffb4bc;
+}
+
+.btn.ghost {
+  background: transparent;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.status {
+  min-height: 1.4em;
+  color: var(--muted);
+  font-size: 14px;
+  margin: 8px 0 0;
+}
+
+.hints {
+  margin: 22px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.big {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  background: var(--bg1);
+  padding: 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.board {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  padding: 4px;
+  border-radius: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+}
+
+.board.live {
+  background: var(--live-bg);
+  border-color: var(--x);
+}
+
+.cell {
+  aspect-ratio: 1;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  font-size: clamp(14px, 4.2vw, 20px);
+  font-weight: 650;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+}
+
+.board.live .cell:not(.filled) {
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+}
+
+.cell.x { color: var(--x); }
+.cell.o { color: var(--o); }
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: clamp(36px, 10vw, 52px);
+  font-weight: 700;
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+.overlay.show { display: flex; }
+.overlay.x { color: var(--x); background: rgba(53, 138, 221, 0.28); }
+.overlay.o { color: var(--o); background: rgba(216, 90, 48, 0.25); }
+.overlay.draw { color: #c9d3dd; background: rgba(136, 135, 128, 0.35); }
+
+.actions {
+  margin-top: 12px;
+}
+
+.legend {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  gap: 14px;
+}
+
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  vertical-align: -1px;
+  margin-right: 6px;
+}
+
+.swatch.live { background: #7eb6ea; }
+
+.hidden { display: none !important; }

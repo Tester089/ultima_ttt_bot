@@ -1,0 +1,10 @@
+meta:
+  environment: node
+  toolchain:
+    name: npm
+    version: "20"
+build:
+  skip: false
+run:
+  scriptName: src/index.js
+  containerPort: 80

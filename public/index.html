@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>UTTT</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="top">
+      <div class="brand">UTTT</div>
+      <div id="me" class="me"></div>
+    </header>
+
+    <section id="lobby" class="panel">
+      <h1>Ультимативные крестики-нолики</h1>
+      <p class="lead">Онлайн 1 на 1. Быстрый подбор соперника.</p>
+      <button id="btnQueue" class="btn primary" type="button">Быстрая игра</button>
+      <button id="btnCancel" class="btn ghost hidden" type="button">Отменить поиск</button>
+      <p id="lobbyStatus" class="status">Подключение…</p>
+      <ul class="hints">
+        <li>Победа — линия из трёх малых полей</li>
+        <li>Ход соперника идёт в то поле, куда ты отправил</li>
+      </ul>
+    </section>
+
+    <section id="game" class="panel hidden">
+      <div class="bar">
+        <div id="status" class="status">…</div>
+        <div class="meta">
+          <span id="youSide"></span>
+          <span id="vs"></span>
+        </div>
+      </div>
+      <div id="big" class="big"></div>
+      <div class="actions">
+        <button id="btnResign" class="btn danger" type="button">Сдаться</button>
+        <button id="btnRematch" class="btn primary hidden" type="button">Ещё раз</button>
+        <button id="btnLobby" class="btn ghost hidden" type="button">В лобби</button>
+      </div>
+      <div class="legend">
+        <span><i class="swatch live"></i>доступное поле</span>
+      </div>
+    </section>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
