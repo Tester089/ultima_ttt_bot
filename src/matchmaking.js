@@ -7,6 +7,10 @@ function uid() {
   return crypto.randomBytes(8).toString('hex');
 }
 
+function mlog(...args) {
+  console.log('[mm]', new Date().toISOString(), ...args);
+}
+
 class Matchmaking {
   constructor() {
     /** @type {Map<string, any>} */
@@ -21,6 +25,7 @@ class Matchmaking {
     const id = profile.id;
     const existing = this.players.get(id);
     if (existing?.ws && existing.ws !== ws && existing.ws.readyState === 1) {
+      mlog('register replace existing ws', id);
       try {
         existing.ws.close(4000, 'replaced');
       } catch (_) {
@@ -37,6 +42,7 @@ class Matchmaking {
       queued: false,
     };
     this.players.set(id, player);
+    mlog('register', id, player.name, 'room=', player.roomId, 'players=', this.players.size);
     return player;
   }
 
@@ -76,28 +82,38 @@ class Matchmaking {
 
   enqueue(playerId) {
     const player = this.players.get(playerId);
-    if (!player) return { ok: false, error: 'not_registered' };
-    if (player.roomId) return { ok: false, error: 'in_game' };
+    if (!player) {
+      mlog('enqueue fail not_registered', playerId);
+      return { ok: false, error: 'not_registered' };
+    }
+    if (player.roomId) {
+      mlog('enqueue fail in_game', playerId, player.roomId);
+      return { ok: false, error: 'in_game' };
+    }
 
     this.leaveQueue(playerId);
     player.queued = true;
     this.queue.push(playerId);
+    mlog('enqueue', playerId, 'queueLen=', this.queue.length, 'queue=', this.queue.slice());
     this.send(playerId, { type: 'queued', position: this.queue.length });
     this.tryMatch();
     return { ok: true };
   }
 
   tryMatch() {
+    mlog('tryMatch queueLen=', this.queue.length);
     while (this.queue.length >= 2) {
       const a = this.queue.shift();
       const b = this.queue.shift();
       const pa = this.players.get(a);
       const pb = this.players.get(b);
       if (!pa?.ws || pa.ws.readyState !== 1) {
+        mlog('tryMatch drop stale a', a);
         if (pb) this.queue.unshift(b);
         continue;
       }
       if (!pb?.ws || pb.ws.readyState !== 1) {
+        mlog('tryMatch drop stale b', b);
         this.queue.unshift(a);
         continue;
       }
@@ -110,6 +126,7 @@ class Matchmaking {
     const swap = Math.random() < 0.5;
     const x = swap ? pa : pb;
     const o = swap ? pb : pa;
+    mlog('createRoom', roomId, 'X=', x.id, x.name, 'O=', o.id, o.name);
 
     const room = {
       id: roomId,

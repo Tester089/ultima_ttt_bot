@@ -4,7 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>UTTT</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- Local SDK: telegram.org CDN часто недоступен → initData пустой → auth_failed -->
+  <script src="/telegram-web-app.js"></script>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -20,6 +21,7 @@
       <button id="btnQueue" class="btn primary" type="button">Быстрая игра</button>
       <button id="btnCancel" class="btn ghost hidden" type="button">Отменить поиск</button>
       <p id="lobbyStatus" class="status">Подключение…</p>
+      <pre id="debugBox" class="debug"></pre>
       <ul class="hints">
         <li>Победа — линия из трёх малых полей</li>
         <li>Ход соперника идёт в то поле, куда ты отправил</li>

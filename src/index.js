@@ -37,7 +37,13 @@ app.get('/health', (_req, res) => {
     ok: true,
     queue: matchmaking.queue.length,
     rooms: matchmaking.rooms.size,
+    players: matchmaking.players.size,
+    ts: new Date().toISOString(),
   });
+});
+
+app.get('/debug/ping', (_req, res) => {
+  res.type('text').send('uttt-ok ' + new Date().toISOString());
 });
 
 const { bot, webhookMiddleware } = createBot({ token: BOT_TOKEN, publicUrl: PUBLIC_URL });
@@ -58,12 +64,17 @@ attachWebSocket(server, {
 });
 
 server.listen(PORT, async () => {
-  console.log(`UTTT listening on :${PORT}`);
+  console.log(`[boot] ${new Date().toISOString()} UTTT listening on :${PORT}`);
+  console.log(`[boot] PUBLIC_URL=${PUBLIC_URL}`);
+  console.log(`[boot] ALLOW_GUESTS=${ALLOW_GUESTS}`);
+  console.log(`[boot] BOT_TOKEN set=${Boolean(BOT_TOKEN)} len=${BOT_TOKEN.length} prefix=${BOT_TOKEN.slice(0, 10)}…`);
   try {
     await bot.init();
+    const me = await bot.api.getMe();
+    console.log(`[boot] bot=@${me.username} id=${me.id}`);
     await setupTelegram({ bot, publicUrl: PUBLIC_URL, secretToken: WEBHOOK_SECRET });
-    console.log('Telegram ready');
+    console.log('[boot] Telegram ready');
   } catch (err) {
-    console.error('Telegram setup failed:', err);
+    console.error('[boot] Telegram setup failed:', err);
   }
 });
