@@ -4,7 +4,7 @@ const { Bot, InlineKeyboard, webhookCallback } = require('grammy');
 
 function createBot({ token, publicUrl }) {
   const bot = new Bot(token);
-  const appUrl = `${publicUrl.replace(/\/$/, '')}/?v=3`;
+  const appUrl = `${publicUrl.replace(/\/$/, '')}/?v=4`;
 
   const playKeyboard = new InlineKeyboard().webApp('Играть UTTT', appUrl);
 
@@ -54,7 +54,7 @@ function createBot({ token, publicUrl }) {
 async function setupTelegram({ bot, publicUrl, secretToken }) {
   const base = publicUrl.replace(/\/$/, '');
   const webhookUrl = `${base}/telegram/webhook`;
-  const appUrl = `${base}/?v=3`;
+  const appUrl = `${base}/?v=4`;
 
   await bot.api.setWebhook(webhookUrl, {
     secret_token: secretToken,

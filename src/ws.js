@@ -121,6 +121,9 @@ function attachWebSocket(server, { matchmaking, botToken, allowGuests }) {
         case 'queue': {
           const r = matchmaking.enqueue(playerId);
           log(`#${cid} queue player=${playerId} result=`, r);
+          if (!r.ok) {
+            safeSend(socket, { type: 'error', error: r.error || 'queue_failed', roomId: r.roomId });
+          }
           break;
         }
         case 'cancel_queue':
@@ -128,6 +131,12 @@ function attachWebSocket(server, { matchmaking, botToken, allowGuests }) {
           safeSend(socket, { type: 'queue_cancelled' });
           log(`#${cid} cancel_queue player=${playerId}`);
           break;
+        case 'leave_room': {
+          const r = matchmaking.leaveRoom(playerId);
+          log(`#${cid} leave_room player=${playerId} result=`, r);
+          safeSend(socket, { type: 'left_room', ok: r.ok, left: r.left, resigned: r.resigned });
+          break;
+        }
         case 'move': {
           const r = matchmaking.move(playerId, Number(msg.board), Number(msg.cell));
           log(`#${cid} move player=${playerId} b=${msg.board} c=${msg.cell} result=`, r);
@@ -141,6 +150,7 @@ function attachWebSocket(server, { matchmaking, botToken, allowGuests }) {
         case 'rematch': {
           const r = matchmaking.rematch(playerId);
           log(`#${cid} rematch player=${playerId} result=`, r);
+          if (!r.ok) safeSend(socket, { type: 'error', error: r.error || 'rematch_failed' });
           break;
         }
         case 'ping':
@@ -156,11 +166,21 @@ function attachWebSocket(server, { matchmaking, botToken, allowGuests }) {
     }
   });
 
+  // Server ping frames — прокси Amvera/Telegram не режут idle WS
   setInterval(() => {
+    for (const client of wss.clients) {
+      if (client.readyState === 1) {
+        try {
+          client.ping();
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
     log(
       `stats clients=${wss.clients.size} queue=${matchmaking.queue.length} rooms=${matchmaking.rooms.size}`
     );
-  }, 30000);
+  }, 15000);
 
   return wss;
 }

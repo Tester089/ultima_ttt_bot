@@ -344,7 +344,8 @@
         els.vs.textContent = `vs ${msg.opponent}`;
         showGame();
         render();
-        dlog('matched', { side: msg.side, opponent: msg.opponent, roomId: msg.roomId });
+        dlog('matched', { side: msg.side, opponent: msg.opponent, roomId: msg.roomId, resumed: msg.resumed });
+        if (msg.resumed) els.status.textContent = 'Переподключение — партия продолжается';
         if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         break;
       case 'state':
@@ -364,6 +365,11 @@
           tg.HapticFeedback.notificationOccurred(msg.winnerSide === mySide ? 'success' : 'error');
         }
         break;
+      case 'left_room':
+        dlog('left_room', msg);
+        showLobby();
+        els.lobbyStatus.textContent = 'Готов к игре';
+        break;
       case 'error': {
         const reason = msg.reason || msg.error;
         dlog('ERROR from server', msg);
@@ -373,8 +379,11 @@
           const hint = msg.detail?.hint || '';
           els.lobbyStatus.textContent =
             'Ошибка авторизации: ' + reason + (hint ? ' — ' + hint : '');
+        } else if (msg.error === 'in_game') {
+          els.lobbyStatus.textContent = 'Уже в партии — открой экран игры или нажми «Ещё раз»';
         } else {
           els.lobbyStatus.textContent = 'Ошибка: ' + reason;
+          showLobby();
         }
         break;
       }
@@ -411,13 +420,14 @@
     finished = false;
     state = null;
     mySide = null;
+    send({ type: 'leave_room' });
     showLobby();
     els.lobbyStatus.textContent = 'Готов к игре';
   });
 
   setInterval(() => {
     if (welcomeOk && !authFailed) send({ type: 'ping' });
-  }, 25000);
+  }, 12000);
 
   // Даём SDK время прочитать hash / TelegramWebviewProxy
   let tries = 0;
