@@ -95,6 +95,7 @@ function attachWebSocket(server, { matchmaking, botToken, allowGuests }) {
             name: player.name,
             guest: true,
             authReason: result.reason,
+            rating: matchmaking.ratingOf(player),
           });
           return;
         }
@@ -107,6 +108,7 @@ function attachWebSocket(server, { matchmaking, botToken, allowGuests }) {
           playerId: player.id,
           name: player.name,
           guest: false,
+          rating: matchmaking.ratingOf(player),
         });
         return;
       }
@@ -151,6 +153,26 @@ function attachWebSocket(server, { matchmaking, botToken, allowGuests }) {
           const r = matchmaking.rematch(playerId);
           log(`#${cid} rematch player=${playerId} result=`, r);
           if (!r.ok) safeSend(socket, { type: 'error', error: r.error || 'rematch_failed' });
+          break;
+        }
+        case 'create_invite': {
+          const r = matchmaking.createInvite(playerId);
+          log(`#${cid} create_invite`, r);
+          if (!r.ok) safeSend(socket, { type: 'error', error: r.error || 'invite_failed' });
+          break;
+        }
+        case 'cancel_invite':
+          matchmaking.cancelInvite(playerId);
+          break;
+        case 'join_invite': {
+          const r = matchmaking.joinInvite(playerId, msg.code);
+          log(`#${cid} join_invite`, msg.code, r);
+          if (!r.ok) safeSend(socket, { type: 'error', error: r.error || 'join_failed' });
+          break;
+        }
+        case 'leaderboard': {
+          const rows = matchmaking.store ? matchmaking.store.leaderboard(Number(msg.limit) || 20) : [];
+          safeSend(socket, { type: 'leaderboard', rows });
           break;
         }
         case 'ping':

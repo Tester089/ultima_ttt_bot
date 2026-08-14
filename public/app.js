@@ -15,7 +15,7 @@
       console.log(LOG_PREFIX, ...args);
     } catch (_) {}
     const box = debugBox();
-    if (box) box.textContent = logs.slice(-12).join('\n');
+    if (box) box.textContent = logs.slice(-10).join('\n');
   }
 
   function stringify(v) {
@@ -28,101 +28,75 @@
     }
   }
 
-  window.addEventListener('error', (e) => {
-    dlog('window.error', e.message, e.filename, e.lineno);
-  });
-  window.addEventListener('unhandledrejection', (e) => {
-    dlog('unhandledrejection', String(e.reason));
-  });
-
-  dlog('boot', {
-    href: location.href,
-    host: location.host,
-    proto: location.protocol,
-    hasTelegramGlobal: typeof window.Telegram !== 'undefined',
-    hasWebApp: Boolean(window.Telegram?.WebApp),
-    userAgent: navigator.userAgent.slice(0, 120),
-  });
+  window.addEventListener('error', (e) => dlog('window.error', e.message));
+  window.addEventListener('unhandledrejection', (e) => dlog('unhandledrejection', String(e.reason)));
 
   const tg = window.Telegram?.WebApp;
   if (tg) {
     try {
       tg.ready();
       tg.expand();
-      dlog('tg.ready/expand ok', {
-        version: tg.version,
-        platform: tg.platform,
-        colorScheme: tg.colorScheme,
-        initDataLen: (tg.initData || '').length,
-        hasInitDataUnsafe: Boolean(tg.initDataUnsafe?.user),
-        userId: tg.initDataUnsafe?.user?.id || null,
-        hashLen: (location.hash || '').length,
-      });
       try {
         tg.setHeaderColor('#0f1419');
         tg.setBackgroundColor('#0f1419');
-      } catch (e) {
-        dlog('setHeaderColor failed', String(e));
-      }
+      } catch (_) {}
+      dlog('tg ok', { platform: tg.platform, initDataLen: (tg.initData || '').length });
     } catch (e) {
       dlog('tg.ready failed', String(e));
     }
   } else {
-    dlog('NO Telegram.WebApp — SDK не загрузился или открыто вне Telegram');
+    dlog('NO Telegram.WebApp');
   }
 
-  // Fallback: Telegram кладёт данные в hash #tgWebAppData=...
   function extractInitDataFromHash() {
     const hash = location.hash || '';
     if (!hash.includes('tgWebAppData=')) return '';
     try {
       const params = new URLSearchParams(hash.replace(/^#/, ''));
-      const raw = params.get('tgWebAppData') || '';
-      const decoded = decodeURIComponent(raw);
-      dlog('hash tgWebAppData len=', decoded.length);
-      return decoded;
-    } catch (e) {
-      dlog('hash parse fail', String(e));
+      return decodeURIComponent(params.get('tgWebAppData') || '');
+    } catch (_) {
       return '';
     }
   }
 
   function getInitData() {
-    const fromTg = tg?.initData || '';
-    if (fromTg) {
-      dlog('initData source=Telegram.WebApp len=', fromTg.length);
-      return fromTg;
-    }
-    const fromHash = extractInitDataFromHash();
-    if (fromHash) {
-      dlog('initData source=location.hash len=', fromHash.length);
-      return fromHash;
-    }
-    // sessionStorage иногда хранит то, что SDK уже распарсил
-    try {
-      const raw = sessionStorage.getItem('tgWebAppData') || sessionStorage.getItem('__telegram__initParams');
-      dlog('sessionStorage probe', raw ? String(raw).slice(0, 80) : null);
-    } catch (e) {
-      dlog('sessionStorage fail', String(e));
-    }
-    dlog('initData EMPTY — открой из @ultima_ttt_bot, не из браузера');
-    return '';
+    if (tg?.initData) return tg.initData;
+    return extractInitDataFromHash();
+  }
+
+  function pendingInviteCode() {
+    const q = new URLSearchParams(location.search).get('inv');
+    if (q) return q.toUpperCase();
+    const sp = tg?.initDataUnsafe?.start_param || '';
+    if (String(sp).startsWith('inv_')) return String(sp).slice(4).toUpperCase();
+    if (/^[A-Z0-9]{6}$/i.test(sp)) return String(sp).toUpperCase();
+    return null;
   }
 
   const els = {
     lobby: document.getElementById('lobby'),
     game: document.getElementById('game'),
     me: document.getElementById('me'),
+    ratingCard: document.getElementById('ratingCard'),
     lobbyStatus: document.getElementById('lobbyStatus'),
     status: document.getElementById('status'),
     youSide: document.getElementById('youSide'),
     vs: document.getElementById('vs'),
     big: document.getElementById('big'),
     btnQueue: document.getElementById('btnQueue'),
+    btnInvite: document.getElementById('btnInvite'),
     btnCancel: document.getElementById('btnCancel'),
+    btnCancelInvite: document.getElementById('btnCancelInvite'),
+    btnTop: document.getElementById('btnTop'),
+    btnShare: document.getElementById('btnShare'),
+    btnCopy: document.getElementById('btnCopy'),
     btnResign: document.getElementById('btnResign'),
     btnRematch: document.getElementById('btnRematch'),
     btnLobby: document.getElementById('btnLobby'),
+    inviteBox: document.getElementById('inviteBox'),
+    inviteCode: document.getElementById('inviteCode'),
+    topBox: document.getElementById('topBox'),
+    topList: document.getElementById('topList'),
   };
 
   const cellEls = [];
@@ -135,6 +109,9 @@
   let authFailed = false;
   let welcomeOk = false;
   let connectAttempt = 0;
+  let inviteDeepLink = '';
+  let inviteShareText = '';
+  let autoJoinDone = false;
 
   for (let b = 0; b < 9; b++) {
     const bd = document.createElement('div');
@@ -147,7 +124,6 @@
       el.type = 'button';
       el.className = 'cell';
       el.addEventListener('click', () => {
-        dlog('click cell', { b, c, mySide, turn: state?.turn, finished });
         if (!ws || finished || !state || mySide !== state.turn) return;
         send({ type: 'move', board: b, cell: c });
       });
@@ -205,11 +181,25 @@
     }
   }
 
+  function setRatingCard(rating, name) {
+    if (!rating || rating.guest) {
+      els.ratingCard.textContent = 'Гость — рейтинг не считается';
+      return;
+    }
+    const g = rating.games || 0;
+    const w = rating.wins || 0;
+    const l = rating.losses || 0;
+    const d = rating.draws || 0;
+    els.ratingCard.textContent = `${name || 'Вы'}: ${rating.display}  ·  ${w}/${l}/${d} (${g} игр)`;
+  }
+
   function showLobby() {
     els.lobby.classList.remove('hidden');
     els.game.classList.add('hidden');
     els.btnQueue.classList.remove('hidden');
+    els.btnInvite.classList.remove('hidden');
     els.btnCancel.classList.add('hidden');
+    els.btnCancelInvite.classList.add('hidden');
     els.btnQueue.disabled = false;
   }
 
@@ -217,7 +207,19 @@
     els.lobby.classList.remove('hidden');
     els.game.classList.add('hidden');
     els.btnQueue.classList.add('hidden');
+    els.btnInvite.classList.add('hidden');
     els.btnCancel.classList.remove('hidden');
+    els.inviteBox.classList.add('hidden');
+  }
+
+  function showInviteWaiting() {
+    els.lobby.classList.remove('hidden');
+    els.game.classList.add('hidden');
+    els.btnQueue.classList.add('hidden');
+    els.btnInvite.classList.add('hidden');
+    els.btnCancel.classList.add('hidden');
+    els.btnCancelInvite.classList.remove('hidden');
+    els.inviteBox.classList.remove('hidden');
   }
 
   function showGame() {
@@ -226,107 +228,75 @@
     els.btnResign.classList.remove('hidden');
     els.btnRematch.classList.add('hidden');
     els.btnLobby.classList.add('hidden');
+    els.inviteBox.classList.add('hidden');
   }
 
   function send(obj) {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      dlog('send SKIP (ws not open)', obj.type, 'readyState=', ws?.readyState);
+      dlog('send SKIP', obj.type);
       return;
     }
-    const text = JSON.stringify(obj);
-    dlog('>>', obj.type, 'bytes=', text.length);
-    ws.send(text);
-  }
-
-  function buildClientDebug() {
-    return {
-      hasTg: Boolean(tg),
-      version: tg?.version || null,
-      platform: tg?.platform || null,
-      initDataLen: (tg?.initData || '').length,
-      unsafeUser: tg?.initDataUnsafe?.user?.id || null,
-      hrefHost: location.host,
-      hashHasData: (location.hash || '').includes('tgWebAppData'),
-      attempt: connectAttempt,
-    };
+    ws.send(JSON.stringify(obj));
+    dlog('>>', obj.type);
   }
 
   function connect() {
-    if (authFailed) {
-      dlog('connect blocked: authFailed');
-      return;
-    }
+    if (authFailed) return;
     connectAttempt += 1;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}/ws`;
-    dlog('WS connecting', url, 'attempt=', connectAttempt);
-    els.lobbyStatus.textContent = 'Подключение к серверу…';
-
-    try {
-      ws = new WebSocket(url);
-    } catch (e) {
-      dlog('WS construct error', String(e));
-      els.lobbyStatus.textContent = 'WS ошибка: ' + e;
-      return;
-    }
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
 
     ws.addEventListener('open', () => {
-      dlog('WS open');
       els.lobbyStatus.textContent = 'Авторизация…';
-      const initData = getInitData();
       send({
         type: 'hello',
-        initData,
-        debug: buildClientDebug(),
+        initData: getInitData(),
+        debug: {
+          hasTg: Boolean(tg),
+          platform: tg?.platform || null,
+          initDataLen: (tg?.initData || '').length,
+          inv: pendingInviteCode(),
+          attempt: connectAttempt,
+        },
       });
     });
 
     ws.addEventListener('message', (ev) => {
-      dlog('<< raw', String(ev.data).slice(0, 240));
       let msg;
       try {
         msg = JSON.parse(ev.data);
-      } catch (e) {
-        dlog('<< bad json', String(e));
+      } catch (_) {
         return;
       }
       onMessage(msg);
     });
 
     ws.addEventListener('close', (ev) => {
-      dlog('WS close', { code: ev.code, reason: ev.reason, wasClean: ev.wasClean, welcomeOk, authFailed });
-      if (authFailed) {
-        els.lobbyStatus.textContent = 'Авторизация не прошла. Смотри лог ниже.';
-        return;
-      }
-      if (welcomeOk && !authFailed) {
-        els.lobbyStatus.textContent = 'Соединение потеряно, переподключение…';
-        clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(connect, 1500);
-      } else if (!welcomeOk) {
-        els.lobbyStatus.textContent = 'Нет связи с сервером, повтор…';
-        clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(connect, 2000);
-      }
-    });
-
-    ws.addEventListener('error', () => {
-      dlog('WS error event');
+      dlog('WS close', ev.code, ev.reason);
+      if (authFailed) return;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, welcomeOk ? 1500 : 2000);
+      els.lobbyStatus.textContent = 'Переподключение…';
     });
   }
 
   function onMessage(msg) {
-    dlog('onMessage', msg.type, msg.reason || msg.error || '');
+    dlog('<<', msg.type, msg.error || msg.reason || '');
     switch (msg.type) {
       case 'welcome':
         welcomeOk = true;
         authFailed = false;
-        els.me.textContent = msg.name;
-        els.lobbyStatus.textContent = msg.guest
-          ? 'Гостевой режим'
-          : 'Готов к игре';
-        dlog('welcome OK', { playerId: msg.playerId, guest: msg.guest });
-        send({ type: 'client_log', payload: { event: 'welcome_ack', ...buildClientDebug() } });
+        els.me.textContent = msg.name + (msg.rating?.display ? ` · ${msg.rating.display}` : '');
+        setRatingCard(msg.rating, msg.name);
+        els.lobbyStatus.textContent = msg.guest ? 'Гостевой режим' : 'Готов к игре';
+        if (!autoJoinDone) {
+          const inv = pendingInviteCode();
+          if (inv) {
+            autoJoinDone = true;
+            els.lobbyStatus.textContent = 'Вход по инвайту ' + inv + '…';
+            send({ type: 'join_invite', code: inv });
+          }
+        }
         break;
       case 'queued':
         showSearching();
@@ -336,110 +306,144 @@
         showLobby();
         els.lobbyStatus.textContent = 'Поиск отменён';
         break;
-      case 'matched':
+      case 'invite_created':
+        inviteDeepLink = msg.deepLink;
+        inviteShareText = msg.shareText;
+        els.inviteCode.textContent = msg.code;
+        showInviteWaiting();
+        els.lobbyStatus.textContent = 'Ждём друга по ссылке…';
+        break;
+      case 'invite_cancelled':
+        showLobby();
+        els.lobbyStatus.textContent = 'Инвайт отменён';
+        break;
+      case 'matched': {
         mySide = msg.side;
         state = msg.state;
         finished = false;
-        els.youSide.textContent = `Вы: ${msg.side}`;
-        els.vs.textContent = `vs ${msg.opponent}`;
+        const myR = msg.ratings?.[mySide]?.display || '—';
+        const oppR = msg.ratings?.[mySide === 'X' ? 'O' : 'X']?.display || '—';
+        els.youSide.textContent = `Вы ${msg.side} (${myR})`;
+        els.vs.textContent = `vs ${msg.opponent} (${oppR}) · ${msg.mode || 'ranked'}`;
         showGame();
         render();
-        dlog('matched', { side: msg.side, opponent: msg.opponent, roomId: msg.roomId, resumed: msg.resumed });
         if (msg.resumed) els.status.textContent = 'Переподключение — партия продолжается';
         if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         break;
+      }
       case 'state':
         state = msg.state;
-        dlog('state', { turn: state.turn, forced: state.forced, moves: state.moves, over: state.over });
         render();
         break;
-      case 'game_over':
+      case 'game_over': {
         state = msg.state;
         finished = true;
         render();
         els.btnResign.classList.add('hidden');
         els.btnRematch.classList.remove('hidden');
         els.btnLobby.classList.remove('hidden');
-        dlog('game_over', { result: msg.result, winnerSide: msg.winnerSide, reason: msg.reason });
-        if (tg?.HapticFeedback) {
-          tg.HapticFeedback.notificationOccurred(msg.winnerSide === mySide ? 'success' : 'error');
-        }
-        break;
-      case 'left_room':
-        dlog('left_room', msg);
-        showLobby();
-        els.lobbyStatus.textContent = 'Готов к игре';
-        break;
-      case 'error': {
-        const reason = msg.reason || msg.error;
-        dlog('ERROR from server', msg);
-        if (msg.error === 'auth_failed') {
-          authFailed = true;
-          clearTimeout(reconnectTimer);
-          const hint = msg.detail?.hint || '';
-          els.lobbyStatus.textContent =
-            'Ошибка авторизации: ' + reason + (hint ? ' — ' + hint : '');
-        } else if (msg.error === 'in_game') {
-          els.lobbyStatus.textContent = 'Уже в партии — открой экран игры или нажми «Ещё раз»';
-        } else {
-          els.lobbyStatus.textContent = 'Ошибка: ' + reason;
-          showLobby();
+        if (msg.ratingDelta && mySide) {
+          const d = msg.ratingDelta[mySide];
+          const sign = d.to - d.from >= 0 ? '+' : '';
+          els.status.textContent =
+            (state.over === mySide ? 'Победа! ' : state.over === '-' ? 'Ничья. ' : 'Поражение. ') +
+            `Рейтинг ${d.from} → ${d.to} (${sign}${Math.round(d.to - d.from)})`;
+          if (msg.ratings?.[mySide]) setRatingCard(msg.ratings[mySide], els.me.textContent.split(' · ')[0]);
         }
         break;
       }
-      case 'pong':
-        dlog('pong', msg);
+      case 'left_room':
+        showLobby();
+        els.lobbyStatus.textContent = 'Готов к игре';
         break;
+      case 'leaderboard':
+        els.topBox.classList.remove('hidden');
+        els.topList.innerHTML = (msg.rows || [])
+          .map(
+            (r) =>
+              `<li><strong>${r.rank}. ${r.name}</strong> — ${r.display} <span>(${r.wins}/${r.losses}/${r.draws})</span></li>`
+          )
+          .join('') || '<li>Пока пусто — сыграйте рейтинговую партию</li>';
+        break;
+      case 'error': {
+        const reason = msg.reason || msg.error;
+        if (msg.error === 'auth_failed') {
+          authFailed = true;
+          els.lobbyStatus.textContent = 'Ошибка авторизации: ' + reason;
+        } else if (msg.error === 'in_game') {
+          els.lobbyStatus.textContent = 'Уже в партии';
+        } else if (msg.error === 'host_offline') {
+          els.lobbyStatus.textContent = 'Хост инвайта офлайн — пусть откроет игру';
+          showLobby();
+        } else if (msg.error === 'invite_not_found') {
+          els.lobbyStatus.textContent = 'Инвайт не найден или истёк';
+          showLobby();
+        } else {
+          els.lobbyStatus.textContent = 'Ошибка: ' + reason;
+        }
+        break;
+      }
       default:
-        dlog('unknown msg', msg);
         break;
     }
   }
 
-  els.btnQueue.addEventListener('click', () => {
-    dlog('btnQueue');
-    send({ type: 'queue' });
+  els.btnQueue.addEventListener('click', () => send({ type: 'queue' }));
+  els.btnCancel.addEventListener('click', () => send({ type: 'cancel_queue' }));
+  els.btnInvite.addEventListener('click', () => send({ type: 'create_invite' }));
+  els.btnCancelInvite.addEventListener('click', () => send({ type: 'cancel_invite' }));
+  els.btnTop.addEventListener('click', () => {
+    send({ type: 'leaderboard', limit: 20 });
+    fetch('/api/leaderboard?limit=20')
+      .then((r) => r.json())
+      .then((data) => onMessage({ type: 'leaderboard', rows: data.rows }))
+      .catch(() => {});
   });
-  els.btnCancel.addEventListener('click', () => {
-    dlog('btnCancel');
-    send({ type: 'cancel_queue' });
+  els.btnShare.addEventListener('click', () => {
+    if (tg?.openTelegramLink && inviteDeepLink) {
+      tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(inviteDeepLink)}&text=${encodeURIComponent('Сыграем в UTTT!')}`);
+      return;
+    }
+    if (navigator.share && inviteShareText) {
+      navigator.share({ text: inviteShareText }).catch(() => {});
+      return;
+    }
+    els.btnCopy.click();
+  });
+  els.btnCopy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(inviteDeepLink || inviteShareText);
+      els.lobbyStatus.textContent = 'Ссылка скопирована';
+    } catch (_) {
+      els.lobbyStatus.textContent = inviteDeepLink;
+    }
   });
   els.btnResign.addEventListener('click', () => {
-    dlog('btnResign');
     if (confirm('Сдаться?')) send({ type: 'resign' });
   });
   els.btnRematch.addEventListener('click', () => {
-    dlog('btnRematch');
     finished = false;
     send({ type: 'rematch' });
     showSearching();
     els.lobbyStatus.textContent = 'Ищем соперника…';
   });
   els.btnLobby.addEventListener('click', () => {
-    dlog('btnLobby');
     finished = false;
     state = null;
     mySide = null;
     send({ type: 'leave_room' });
     showLobby();
-    els.lobbyStatus.textContent = 'Готов к игре';
   });
 
   setInterval(() => {
     if (welcomeOk && !authFailed) send({ type: 'ping' });
   }, 12000);
 
-  // Даём SDK время прочитать hash / TelegramWebviewProxy
   let tries = 0;
-  function waitAndConnect() {
+  (function waitAndConnect() {
     tries += 1;
     const len = (tg?.initData || '').length || extractInitDataFromHash().length;
-    dlog('waitAndConnect try=', tries, 'initDataLen=', len, 'hasTg=', Boolean(tg));
-    if (len > 0 || tries >= 8) {
-      connect();
-      return;
-    }
-    setTimeout(waitAndConnect, 100);
-  }
-  waitAndConnect();
+    if (len > 0 || tries >= 8) connect();
+    else setTimeout(waitAndConnect, 100);
+  })();
 })();

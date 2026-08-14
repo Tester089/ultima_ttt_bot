@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { createGame, play, publicState } = require('./game');
+const { Invites } = require('./invites');
 
 const RECONNECT_GRACE_MS = 20_000;
 
@@ -14,13 +15,26 @@ function mlog(...args) {
 }
 
 class Matchmaking {
-  constructor() {
+  /**
+   * @param {{ store: import('./store').Store, botUsername?: string }} opts
+   */
+  constructor(opts = {}) {
+    this.store = opts.store || null;
+    this.botUsername = opts.botUsername || 'ultima_ttt_bot';
+    this.invites = new Invites();
     /** @type {Map<string, any>} */
     this.players = new Map();
     /** @type {string[]} */
     this.queue = [];
     /** @type {Map<string, any>} */
     this.rooms = new Map();
+  }
+
+  ratingOf(player) {
+    if (!this.store || player.guest) {
+      return { display: '—', provisional: true, r: null, guest: true };
+    }
+    return this.store.profile(player.id, player.name);
   }
 
   register(ws, profile) {
@@ -45,6 +59,7 @@ class Matchmaking {
     const player = existing || {
       id,
       name: profile.name || `Player ${id}`,
+      guest: Boolean(profile.guest),
       ws: null,
       roomId: null,
       side: null,
@@ -53,12 +68,13 @@ class Matchmaking {
     };
 
     player.name = profile.name || player.name;
+    player.guest = Boolean(profile.guest);
     player.ws = ws;
     player.queued = false;
     this.players.set(id, player);
+    if (this.store && !player.guest) this.store.getOrCreate(id, player.name);
     mlog('register', id, player.name, 'room=', player.roomId, 'players=', this.players.size);
 
-    // Переподключение в живую партию
     if (player.roomId) {
       const room = this.rooms.get(player.roomId);
       if (room && !room.finished) {
@@ -70,6 +86,8 @@ class Matchmaking {
           you: player.name,
           opponent: room.names[player.side === 'X' ? 'O' : 'X'],
           state: publicState(room.game),
+          mode: room.mode,
+          ratings: this.roomRatings(room),
           resumed: true,
         });
       } else {
@@ -80,12 +98,22 @@ class Matchmaking {
     return player;
   }
 
+  roomRatings(room) {
+    const out = {};
+    for (const side of ['X', 'O']) {
+      const p = this.players.get(room.players[side]);
+      out[side] = p ? this.ratingOf(p) : null;
+    }
+    return out;
+  }
+
   detach(ws) {
     for (const [id, player] of this.players) {
       if (player.ws !== ws) continue;
 
       player.ws = null;
       this.leaveQueue(id);
+      this.invites.cancel(id);
       mlog('detach', id, 'room=', player.roomId);
 
       if (player.roomId) {
@@ -149,17 +177,14 @@ class Matchmaking {
     }
   }
 
-  /** Сбросить finished/битую комнату, чтобы можно было встать в очередь */
   ensureFreeForQueue(player) {
     if (!player?.roomId) return { ok: true };
     const room = this.rooms.get(player.roomId);
     if (!room) {
-      mlog('stale roomId cleared', player.id, player.roomId);
       this.releasePlayerFromRoom(player);
       return { ok: true };
     }
     if (room.finished) {
-      mlog('finished room released for queue', player.id, room.id);
       this.releasePlayerFromRoom(player);
       return { ok: true };
     }
@@ -177,65 +202,109 @@ class Matchmaking {
       return { ok: true, left: true, resigned: true };
     }
     this.releasePlayerFromRoom(player);
-    mlog('leaveRoom', playerId);
     return { ok: true, left: true };
   }
 
   enqueue(playerId) {
     const player = this.players.get(playerId);
-    if (!player) {
-      mlog('enqueue fail not_registered', playerId);
-      return { ok: false, error: 'not_registered' };
-    }
-
+    if (!player) return { ok: false, error: 'not_registered' };
     const free = this.ensureFreeForQueue(player);
-    if (!free.ok) {
-      mlog('enqueue fail in_game', playerId, free.roomId);
-      return free;
-    }
+    if (!free.ok) return free;
 
+    this.invites.cancel(playerId);
     this.leaveQueue(playerId);
     player.queued = true;
     this.queue.push(playerId);
-    mlog('enqueue', playerId, 'queueLen=', this.queue.length, 'queue=', this.queue.slice());
+    mlog('enqueue', playerId, 'queueLen=', this.queue.length);
     this.send(playerId, { type: 'queued', position: this.queue.length });
     this.tryMatch();
     return { ok: true };
   }
 
   tryMatch() {
-    mlog('tryMatch queueLen=', this.queue.length);
     while (this.queue.length >= 2) {
       const a = this.queue.shift();
       const b = this.queue.shift();
       const pa = this.players.get(a);
       const pb = this.players.get(b);
       if (!pa?.ws || pa.ws.readyState !== 1) {
-        mlog('tryMatch drop stale a', a);
         if (pb) this.queue.unshift(b);
         continue;
       }
       if (!pb?.ws || pb.ws.readyState !== 1) {
-        mlog('tryMatch drop stale b', b);
         this.queue.unshift(a);
         continue;
       }
-      this.createRoom(pa, pb);
+      this.createRoom(pa, pb, 'ranked');
     }
   }
 
-  createRoom(pa, pb) {
+  createInvite(hostId) {
+    const host = this.players.get(hostId);
+    if (!host) return { ok: false, error: 'not_registered' };
+    const free = this.ensureFreeForQueue(host);
+    if (!free.ok) return free;
+    this.leaveQueue(hostId);
+
+    const inv = this.invites.create(hostId);
+    const deepLink = `https://t.me/${this.botUsername}?start=inv_${inv.code}`;
+    const shareText = `Сыграем в UTTT? ${deepLink}`;
+    mlog('invite created', inv.code, 'host=', hostId);
+    this.send(hostId, {
+      type: 'invite_created',
+      code: inv.code,
+      deepLink,
+      shareText,
+      expiresAt: inv.expiresAt,
+    });
+    return { ok: true, code: inv.code, deepLink, shareText, expiresAt: inv.expiresAt };
+  }
+
+  cancelInvite(hostId) {
+    const ok = this.invites.cancel(hostId);
+    if (ok) this.send(hostId, { type: 'invite_cancelled' });
+    return { ok };
+  }
+
+  joinInvite(guestId, code) {
+    const guest = this.players.get(guestId);
+    if (!guest) return { ok: false, error: 'not_registered' };
+    const free = this.ensureFreeForQueue(guest);
+    if (!free.ok) return free;
+
+    const inv = this.invites.get(code);
+    if (!inv) return { ok: false, error: 'invite_not_found' };
+    if (inv.hostId === guestId) return { ok: false, error: 'invite_self' };
+
+    const host = this.players.get(inv.hostId);
+    if (!host?.ws || host.ws.readyState !== 1) {
+      return { ok: false, error: 'host_offline' };
+    }
+    const hostFree = this.ensureFreeForQueue(host);
+    if (!hostFree.ok) return { ok: false, error: 'host_busy' };
+
+    this.invites.consume(code);
+    this.leaveQueue(guestId);
+    this.leaveQueue(inv.hostId);
+    this.createRoom(host, guest, 'invite');
+    return { ok: true };
+  }
+
+  createRoom(pa, pb, mode = 'ranked') {
     const roomId = uid();
     const swap = Math.random() < 0.5;
     const x = swap ? pa : pb;
     const o = swap ? pb : pa;
-    mlog('createRoom', roomId, 'X=', x.id, x.name, 'O=', o.id, o.name);
+    mlog('createRoom', roomId, mode, 'X=', x.id, x.name, 'O=', o.id, o.name);
 
     const room = {
       id: roomId,
+      mode,
       players: { X: x.id, O: o.id },
       names: { X: x.name, O: o.name },
+      guests: { X: Boolean(x.guest), O: Boolean(o.guest) },
       game: createGame(),
+      moves: [], // packed board*9+cell
       createdAt: Date.now(),
       finished: false,
     };
@@ -248,22 +317,16 @@ class Matchmaking {
     o.queued = false;
     this.rooms.set(roomId, room);
 
-    this.send(x.id, {
+    const ratings = this.roomRatings(room);
+    const base = {
       type: 'matched',
       roomId,
-      side: 'X',
-      you: x.name,
-      opponent: o.name,
+      mode,
       state: publicState(room.game),
-    });
-    this.send(o.id, {
-      type: 'matched',
-      roomId,
-      side: 'O',
-      you: o.name,
-      opponent: x.name,
-      state: publicState(room.game),
-    });
+      ratings,
+    };
+    this.send(x.id, { ...base, side: 'X', you: x.name, opponent: o.name });
+    this.send(o.id, { ...base, side: 'O', you: o.name, opponent: x.name });
   }
 
   move(playerId, board, cell) {
@@ -277,12 +340,13 @@ class Matchmaking {
     if (!result.ok) return result;
 
     room.game = result.state;
-    const payload = {
+    room.moves.push(board * 9 + cell);
+
+    this.broadcastRoom(room, {
       type: 'state',
       state: publicState(room.game),
       lastMove: { board, cell, by: player.side },
-    };
-    this.broadcastRoom(room, payload);
+    });
 
     if (room.game.over) {
       this.finishRoom(room, {
@@ -290,6 +354,7 @@ class Matchmaking {
         result: room.game.over,
         winnerSide: room.game.over === '-' ? null : room.game.over,
         winnerName: room.game.over === '-' ? null : room.names[room.game.over],
+        reason: 'mate',
         state: publicState(room.game),
       });
     }
@@ -320,13 +385,71 @@ class Matchmaking {
   finishRoom(room, payload) {
     if (room.finished) return;
     room.finished = true;
-    this.broadcastRoom(room, payload);
-    // Сразу отпускаем игроков — иначе queue даёт in_game ещё 30с
+
+    let ratingUpdate = { rated: false };
+    if (this.store) {
+      let scoreX = 0.5;
+      if (room.game.over === 'X') scoreX = 1;
+      else if (room.game.over === 'O') scoreX = 0;
+
+      ratingUpdate = this.store.applyRatedGame({
+        idX: room.players.X,
+        idO: room.players.O,
+        nameX: room.names.X,
+        nameO: room.names.O,
+        scoreX,
+        guestX: room.guests.X,
+        guestO: room.guests.O,
+      });
+    }
+
+    const fullPayload = {
+      ...payload,
+      ratings: ratingUpdate.rated ? ratingUpdate.after : this.roomRatings(room),
+      ratingDelta: ratingUpdate.rated
+        ? {
+            X: {
+              from: Math.round(ratingUpdate.before.X.r),
+              to: ratingUpdate.after.X.r,
+            },
+            O: {
+              from: Math.round(ratingUpdate.before.O.r),
+              to: ratingUpdate.after.O.r,
+            },
+          }
+        : null,
+    };
+
+    this.broadcastRoom(room, fullPayload);
     this.releaseRoomBindings(room);
-    mlog('finishRoom released players', room.id);
+    mlog('finishRoom', room.id, 'moves=', room.moves.length, 'rated=', ratingUpdate.rated);
+
+    // Компактная запись для обучения ботов — async, не в hot path ходов
+    if (this.store) {
+      const record = {
+        v: 1,
+        id: room.id,
+        ts: new Date().toISOString(),
+        mode: room.mode,
+        result: room.game.over,
+        reason: payload.reason || 'mate',
+        // moves: int 0..80 = board*9+cell — восстанавливается без полного state
+        moves: room.moves,
+        pl: {
+          X: { id: room.players.X, name: room.names.X, guest: room.guests.X },
+          O: { id: room.players.O, name: room.names.O, guest: room.guests.O },
+        },
+        rating: ratingUpdate.rated
+          ? { before: ratingUpdate.before, after: ratingUpdate.after }
+          : null,
+      };
+      setImmediate(() => {
+        this.store.appendGameRecord(record);
+      });
+    }
+
     setTimeout(() => {
       this.rooms.delete(room.id);
-      mlog('room deleted', room.id);
     }, 5_000);
   }
 

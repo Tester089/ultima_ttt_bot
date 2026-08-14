@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
 
+const { Store } = require('./store');
 const { Matchmaking } = require('./matchmaking');
 const { attachWebSocket } = require('./ws');
 const { createBot, setupTelegram } = require('./bot');
@@ -14,6 +15,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || crypto.randomBytes(16).toString('hex');
 const ALLOW_GUESTS = process.env.ALLOW_GUESTS === '1';
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+const ASSET_V = '5';
 
 if (!BOT_TOKEN) {
   console.error('BOT_TOKEN is required');
@@ -25,77 +28,102 @@ if (!PUBLIC_URL) {
   process.exit(1);
 }
 
-const app = express();
-const server = http.createServer(app);
-const matchmaking = new Matchmaking();
+async function main() {
+  const store = new Store(DATA_DIR);
+  await store.init();
 
-app.use(express.json());
+  const matchmaking = new Matchmaking({ store, botUsername: 'ultima_ttt_bot' });
 
-// Запрет кэша для HTML/JS — иначе Telegram WebView держит старый app.js часами
-app.use((req, res, next) => {
-  if (/\.(?:html|js|css)$/i.test(req.path) || req.path === '/' || req.path === '') {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-  }
-  next();
-});
+  const app = express();
+  const server = http.createServer(app);
 
-app.use(
-  express.static(path.join(__dirname, '..', 'public'), {
-    etag: false,
-    lastModified: false,
-    setHeaders(res, filePath) {
-      if (/\.(?:html|js|css)$/i.test(filePath)) {
-        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
-      }
-    },
-  })
-);
+  app.use(express.json());
 
-app.get('/health', (_req, res) => {
-  res.json({
-    ok: true,
-    queue: matchmaking.queue.length,
-    rooms: matchmaking.rooms.size,
-    players: matchmaking.players.size,
-    ts: new Date().toISOString(),
+  app.use((req, res, next) => {
+    if (/\.(?:html|js|css)$/i.test(req.path) || req.path === '/' || req.path === '') {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+    next();
   });
-});
 
-app.get('/debug/ping', (_req, res) => {
-  res.type('text').send('uttt-ok ' + new Date().toISOString());
-});
+  app.use(
+    express.static(path.join(__dirname, '..', 'public'), {
+      etag: false,
+      lastModified: false,
+      setHeaders(res, filePath) {
+        if (/\.(?:html|js|css)$/i.test(filePath)) {
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+        }
+      },
+    })
+  );
 
-const { bot, webhookMiddleware } = createBot({ token: BOT_TOKEN, publicUrl: PUBLIC_URL });
+  app.get('/health', (_req, res) => {
+    res.json({
+      ok: true,
+      queue: matchmaking.queue.length,
+      rooms: matchmaking.rooms.size,
+      players: matchmaking.players.size,
+      ratedPlayers: store.players.size,
+      ts: new Date().toISOString(),
+    });
+  });
 
-app.post('/telegram/webhook', (req, res, next) => {
-  const secret = req.get('x-telegram-bot-api-secret-token');
-  if (secret !== WEBHOOK_SECRET) {
-    res.sendStatus(401);
-    return;
-  }
-  return webhookMiddleware(req, res, next);
-});
+  app.get('/api/leaderboard', (req, res) => {
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+    res.json({ rows: store.leaderboard(limit) });
+  });
 
-attachWebSocket(server, {
-  matchmaking,
-  botToken: BOT_TOKEN,
-  allowGuests: ALLOW_GUESTS,
-});
+  app.get('/debug/ping', (_req, res) => {
+    res.type('text').send('uttt-ok ' + new Date().toISOString());
+  });
 
-server.listen(PORT, async () => {
-  console.log(`[boot] ${new Date().toISOString()} UTTT listening on :${PORT}`);
-  console.log(`[boot] PUBLIC_URL=${PUBLIC_URL}`);
-  console.log(`[boot] ALLOW_GUESTS=${ALLOW_GUESTS}`);
-  console.log(`[boot] BOT_TOKEN set=${Boolean(BOT_TOKEN)} len=${BOT_TOKEN.length} prefix=${BOT_TOKEN.slice(0, 10)}…`);
-  try {
-    await bot.init();
-    const me = await bot.api.getMe();
-    console.log(`[boot] bot=@${me.username} id=${me.id}`);
-    await setupTelegram({ bot, publicUrl: PUBLIC_URL, secretToken: WEBHOOK_SECRET });
-    console.log('[boot] Telegram ready');
-  } catch (err) {
-    console.error('[boot] Telegram setup failed:', err);
-  }
+  const { bot, webhookMiddleware } = createBot({
+    token: BOT_TOKEN,
+    publicUrl: PUBLIC_URL,
+    assetVersion: ASSET_V,
+  });
+
+  app.post('/telegram/webhook', (req, res, next) => {
+    const secret = req.get('x-telegram-bot-api-secret-token');
+    if (secret !== WEBHOOK_SECRET) {
+      res.sendStatus(401);
+      return;
+    }
+    return webhookMiddleware(req, res, next);
+  });
+
+  attachWebSocket(server, {
+    matchmaking,
+    botToken: BOT_TOKEN,
+    allowGuests: ALLOW_GUESTS,
+  });
+
+  server.listen(PORT, async () => {
+    console.log(`[boot] ${new Date().toISOString()} UTTT listening on :${PORT}`);
+    console.log(`[boot] PUBLIC_URL=${PUBLIC_URL} DATA_DIR=${DATA_DIR}`);
+    console.log(`[boot] ALLOW_GUESTS=${ALLOW_GUESTS}`);
+    try {
+      await bot.init();
+      const me = await bot.api.getMe();
+      matchmaking.botUsername = me.username || matchmaking.botUsername;
+      console.log(`[boot] bot=@${me.username} id=${me.id}`);
+      await setupTelegram({
+        bot,
+        publicUrl: PUBLIC_URL,
+        secretToken: WEBHOOK_SECRET,
+        assetVersion: ASSET_V,
+      });
+      console.log('[boot] Telegram ready');
+    } catch (err) {
+      console.error('[boot] Telegram setup failed:', err);
+    }
+  });
+}
+
+main().catch((err) => {
+  console.error('[boot] fatal', err);
+  process.exit(1);
 });

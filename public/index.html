@@ -4,9 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>UTTT</title>
-  <!-- Local SDK: telegram.org CDN часто недоступен → initData пустой → auth_failed -->
-  <script src="/telegram-web-app.js?v=4"></script>
-  <link rel="stylesheet" href="/styles.css?v=4" />
+  <script src="/telegram-web-app.js?v=5"></script>
+  <link rel="stylesheet" href="/styles.css?v=5" />
 </head>
 <body>
   <div class="app">
@@ -17,15 +16,32 @@
 
     <section id="lobby" class="panel">
       <h1>Ультимативные крестики-нолики</h1>
-      <p class="lead">Онлайн 1 на 1. Быстрый подбор соперника.</p>
+      <p class="lead">Рейтинговый онлайн и игра с другом по инвайту.</p>
+
+      <div id="ratingCard" class="rating-card">Рейтинг: …</div>
+
       <button id="btnQueue" class="btn primary" type="button">Быстрая игра</button>
+      <button id="btnInvite" class="btn" type="button">Пригласить друга</button>
       <button id="btnCancel" class="btn ghost hidden" type="button">Отменить поиск</button>
+      <button id="btnCancelInvite" class="btn ghost hidden" type="button">Отменить инвайт</button>
+      <button id="btnTop" class="btn ghost" type="button">Рейтинг топ</button>
+
+      <div id="inviteBox" class="invite-box hidden">
+        <div class="invite-code" id="inviteCode">————</div>
+        <button id="btnShare" class="btn primary" type="button">Поделиться ссылкой</button>
+        <button id="btnCopy" class="btn ghost" type="button">Скопировать</button>
+      </div>
+
+      <div id="topBox" class="top-box hidden">
+        <ol id="topList"></ol>
+      </div>
+
       <p id="lobbyStatus" class="status">Подключение…</p>
       <pre id="debugBox" class="debug"></pre>
       <ul class="hints">
-        <li>Победа — линия из трёх малых полей</li>
-        <li>Ход соперника идёт в то поле, куда ты отправил</li>
-        <li>Открывай только из бота @ultima_ttt_bot (кнопка «Играть»)</li>
+        <li>Рейтинг Glicko: у новичков число с «?» — provisional</li>
+        <li>Инвайт: друг открывает ссылку из бота</li>
+        <li>Партии пишутся компактно для обучения ботов</li>
       </ul>
     </section>
 
@@ -40,7 +56,7 @@
       <div id="big" class="big"></div>
       <div class="actions">
         <button id="btnResign" class="btn danger" type="button">Сдаться</button>
-        <button id="btnRematch" class="btn primary hidden" type="button">Ещё раз</button>
+        <button id="btnRematch" class="btn primary hidden" type="button">Ещё раз (очередь)</button>
         <button id="btnLobby" class="btn ghost hidden" type="button">В лобби</button>
       </div>
       <div class="legend">
@@ -48,6 +64,6 @@
       </div>
     </section>
   </div>
-  <script src="/app.js?v=4"></script>
+  <script src="/app.js?v=5"></script>
 </body>
 </html>

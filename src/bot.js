@@ -2,43 +2,61 @@
 
 const { Bot, InlineKeyboard, webhookCallback } = require('grammy');
 
-function createBot({ token, publicUrl }) {
-  const bot = new Bot(token);
-  const appUrl = `${publicUrl.replace(/\/$/, '')}/?v=4`;
+function appUrl(publicUrl, assetVersion, invCode) {
+  const base = `${publicUrl.replace(/\/$/, '')}/?v=${assetVersion || '5'}`;
+  if (invCode) return `${base}&inv=${encodeURIComponent(invCode)}`;
+  return base;
+}
 
-  const playKeyboard = new InlineKeyboard().webApp('Играть UTTT', appUrl);
+function createBot({ token, publicUrl, assetVersion }) {
+  const bot = new Bot(token);
 
   bot.command('start', async (ctx) => {
-    console.log('[bot] /start from', ctx.from?.id, ctx.from?.username);
+    const payload = (ctx.match || '').trim();
+    console.log('[bot] /start from', ctx.from?.id, ctx.from?.username, 'payload=', payload);
+
+    let inv = null;
+    if (payload.startsWith('inv_')) inv = payload.slice(4);
+    else if (/^[A-Z0-9]{6}$/i.test(payload)) inv = payload.toUpperCase();
+
+    const url = appUrl(publicUrl, assetVersion, inv);
+    const keyboard = new InlineKeyboard().webApp(inv ? 'Принять вызов' : 'Играть UTTT', url);
+
+    if (inv) {
+      await ctx.reply(
+        `Тебя пригласили сыграть в UTTT.\nКод: ${inv.toUpperCase()}\n\nЖми кнопку — откроется партия с другом.`,
+        { reply_markup: keyboard }
+      );
+      return;
+    }
+
     await ctx.reply(
       'UTTT — ультимативные крестики-нолики.\n\n' +
-        'Поле 3×3 из малых полей. Побеждает тот, кто соберёт линию на большом поле.\n\n' +
-        'Жми кнопку — быстрый подбор соперника онлайн.',
-      { reply_markup: playKeyboard }
+        '• Быстрый подбор — рейтинговая очередь\n' +
+        '• Пригласи друга из Mini App\n' +
+        '• Рейтинг Glicko (как на chess.com): у новичков «плавает», потом стабилизируется\n\n' +
+        'Жми кнопку и играй.',
+      { reply_markup: keyboard }
     );
   });
 
   bot.command('play', async (ctx) => {
-    console.log('[bot] /play from', ctx.from?.id, ctx.from?.username);
-    await ctx.reply('Открывай мини-приложение и вставай в очередь:', {
-      reply_markup: playKeyboard,
+    const url = appUrl(publicUrl, assetVersion);
+    await ctx.reply('Открывай мини-приложение:', {
+      reply_markup: new InlineKeyboard().webApp('Играть UTTT', url),
     });
+  });
+
+  bot.command('top', async (ctx) => {
+    await ctx.reply('Топ рейтинга смотри в Mini App (кнопка «Рейтинг») или /play.');
   });
 
   bot.command('help', async (ctx) => {
     await ctx.reply(
-      'Правила кратко:\n' +
-        '• Ходи в клетках малого поля 3×3\n' +
-        '• Соперник обязан играть в том большом поле, куда ты отправил ход\n' +
-        '• Если поле занято или выиграно — можно выбрать любое\n' +
-        '• Победа: линия из 3 малых полей на большом поле\n\n' +
-        'Команды: /start /play /help'
+      'Команды: /start /play /help\n' +
+        'Инвайт: друг присылает ссылку t.me/…?start=inv_CODE\n' +
+        'Рейтинг: Glicko, provisional первые ~10 партий (число с ?).'
     );
-  });
-
-  bot.on('message', async (ctx, next) => {
-    console.log('[bot] message', ctx.from?.id, ctx.message?.text || ctx.message?.web_app_data);
-    return next();
   });
 
   bot.catch((err) => {
@@ -51,10 +69,10 @@ function createBot({ token, publicUrl }) {
   };
 }
 
-async function setupTelegram({ bot, publicUrl, secretToken }) {
+async function setupTelegram({ bot, publicUrl, secretToken, assetVersion }) {
   const base = publicUrl.replace(/\/$/, '');
   const webhookUrl = `${base}/telegram/webhook`;
-  const appUrl = `${base}/?v=4`;
+  const menuUrl = appUrl(publicUrl, assetVersion);
 
   await bot.api.setWebhook(webhookUrl, {
     secret_token: secretToken,
@@ -65,12 +83,12 @@ async function setupTelegram({ bot, publicUrl, secretToken }) {
     menu_button: {
       type: 'web_app',
       text: 'Играть',
-      web_app: { url: appUrl },
+      web_app: { url: menuUrl },
     },
   });
 
   console.log('Webhook set:', webhookUrl);
-  console.log('Menu button URL:', appUrl);
+  console.log('Menu button URL:', menuUrl);
 }
 
 module.exports = { createBot, setupTelegram };

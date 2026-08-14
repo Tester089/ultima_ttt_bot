@@ -222,6 +222,44 @@ body {
 
 .hidden { display: none !important; }
 
+.rating-card {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(78, 161, 255, 0.16), rgba(255, 138, 92, 0.1));
+  border: 1px solid var(--border);
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.invite-box, .top-box {
+  margin: 0 0 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+}
+
+.invite-code {
+  text-align: center;
+  font-size: 28px;
+  font-weight: 750;
+  letter-spacing: 0.2em;
+  margin-bottom: 10px;
+}
+
+.top-box ol {
+  margin: 0;
+  padding-left: 22px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.top-box li strong {
+  color: var(--text);
+}
+
 .debug {
   margin-top: 12px;
   padding: 10px;
@@ -233,6 +271,6 @@ body {
   line-height: 1.35;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 180px;
+  max-height: 140px;
   overflow: auto;
 }
