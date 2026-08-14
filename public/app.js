@@ -98,7 +98,14 @@
       dlog('initData source=location.hash len=', fromHash.length);
       return fromHash;
     }
-    dlog('initData EMPTY');
+    // sessionStorage иногда хранит то, что SDK уже распарсил
+    try {
+      const raw = sessionStorage.getItem('tgWebAppData') || sessionStorage.getItem('__telegram__initParams');
+      dlog('sessionStorage probe', raw ? String(raw).slice(0, 80) : null);
+    } catch (e) {
+      dlog('sessionStorage fail', String(e));
+    }
+    dlog('initData EMPTY — открой из @ultima_ttt_bot, не из браузера');
     return '';
   }
 
@@ -412,12 +419,17 @@
     if (welcomeOk && !authFailed) send({ type: 'ping' });
   }, 25000);
 
-  // Небольшая задержка: на части клиентов initData появляется сразу после ready
-  setTimeout(() => {
-    dlog('delayed initData check', {
-      len: (tg?.initData || '').length,
-      unsafe: tg?.initDataUnsafe?.user?.id || null,
-    });
-    connect();
-  }, 50);
+  // Даём SDK время прочитать hash / TelegramWebviewProxy
+  let tries = 0;
+  function waitAndConnect() {
+    tries += 1;
+    const len = (tg?.initData || '').length || extractInitDataFromHash().length;
+    dlog('waitAndConnect try=', tries, 'initDataLen=', len, 'hasTg=', Boolean(tg));
+    if (len > 0 || tries >= 8) {
+      connect();
+      return;
+    }
+    setTimeout(waitAndConnect, 100);
+  }
+  waitAndConnect();
 })();

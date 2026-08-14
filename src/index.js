@@ -30,7 +30,28 @@ const server = http.createServer(app);
 const matchmaking = new Matchmaking();
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, '..', 'public'), { maxAge: '1h' }));
+
+// Запрет кэша для HTML/JS — иначе Telegram WebView держит старый app.js часами
+app.use((req, res, next) => {
+  if (/\.(?:html|js|css)$/i.test(req.path) || req.path === '/' || req.path === '') {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+  next();
+});
+
+app.use(
+  express.static(path.join(__dirname, '..', 'public'), {
+    etag: false,
+    lastModified: false,
+    setHeaders(res, filePath) {
+      if (/\.(?:html|js|css)$/i.test(filePath)) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+      }
+    },
+  })
+);
 
 app.get('/health', (_req, res) => {
   res.json({

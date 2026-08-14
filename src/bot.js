@@ -4,10 +4,12 @@ const { Bot, InlineKeyboard, webhookCallback } = require('grammy');
 
 function createBot({ token, publicUrl }) {
   const bot = new Bot(token);
+  const appUrl = `${publicUrl.replace(/\/$/, '')}/?v=3`;
 
-  const playKeyboard = new InlineKeyboard().webApp('Играть UTTT', publicUrl);
+  const playKeyboard = new InlineKeyboard().webApp('Играть UTTT', appUrl);
 
   bot.command('start', async (ctx) => {
+    console.log('[bot] /start from', ctx.from?.id, ctx.from?.username);
     await ctx.reply(
       'UTTT — ультимативные крестики-нолики.\n\n' +
         'Поле 3×3 из малых полей. Побеждает тот, кто соберёт линию на большом поле.\n\n' +
@@ -17,6 +19,7 @@ function createBot({ token, publicUrl }) {
   });
 
   bot.command('play', async (ctx) => {
+    console.log('[bot] /play from', ctx.from?.id, ctx.from?.username);
     await ctx.reply('Открывай мини-приложение и вставай в очередь:', {
       reply_markup: playKeyboard,
     });
@@ -33,6 +36,11 @@ function createBot({ token, publicUrl }) {
     );
   });
 
+  bot.on('message', async (ctx, next) => {
+    console.log('[bot] message', ctx.from?.id, ctx.message?.text || ctx.message?.web_app_data);
+    return next();
+  });
+
   bot.catch((err) => {
     console.error('Bot error:', err.error || err);
   });
@@ -44,7 +52,9 @@ function createBot({ token, publicUrl }) {
 }
 
 async function setupTelegram({ bot, publicUrl, secretToken }) {
-  const webhookUrl = `${publicUrl.replace(/\/$/, '')}/telegram/webhook`;
+  const base = publicUrl.replace(/\/$/, '');
+  const webhookUrl = `${base}/telegram/webhook`;
+  const appUrl = `${base}/?v=3`;
 
   await bot.api.setWebhook(webhookUrl, {
     secret_token: secretToken,
@@ -55,11 +65,12 @@ async function setupTelegram({ bot, publicUrl, secretToken }) {
     menu_button: {
       type: 'web_app',
       text: 'Играть',
-      web_app: { url: publicUrl },
+      web_app: { url: appUrl },
     },
   });
 
   console.log('Webhook set:', webhookUrl);
+  console.log('Menu button URL:', appUrl);
 }
 
 module.exports = { createBot, setupTelegram };
