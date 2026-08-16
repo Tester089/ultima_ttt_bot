@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="linza">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="color-scheme" content="light dark">
+<title>Ультимативные крестики-нолики</title>
+<script src="/tg.js"></script>
+<style>
+/* ============================================================
+   Тема — только переменные. Стартовая вшита в документ, чтобы
+   первый экран рисовался без единого запроса; остальные тема
+   догружает по /t/<id>.json и перезаписывает эти же значения.
+   ============================================================ */
+:root{
+  --bg:#f6f6f7; --card:#fff; --ink:#191a1c; --soft:#6e7175;
+  --line:#e2e5ea; --lineHi:#c9ced6; --cell:#e2e5ea;
+  --acc:#0c8060; --x:#191a1c; --o:#0c7457;
+  --display:'IBM Plex Sans',system-ui,sans-serif;
+  --body:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --mono:ui-monospace,'SF Mono',Menlo,monospace;
+  --radius:3px; --gapBig:10px; --gapCell:3px; --ls:-0.01em;
+  --markW:400;
+  /* скин: форма и два цвета */
+  --shape:polygon(20% 0%,50% 30%,80% 0%,100% 20%,70% 50%,100% 80%,80% 100%,50% 70%,20% 100%,0% 80%,30% 50%,0% 20%);
+  --skinA:#191a1c; --skinB:#fff; --skinGlow:none;
+  --oShape:none; --oRound:50%; --oA:#0c7457; --oB:#fff;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.5 var(--body);letter-spacing:var(--ls);
+  -webkit-font-smoothing:antialiased;
+  transition:background .2s,color .2s;
+}
+#app{max-width:430px;margin:0 auto;padding:12px 14px 24px;display:flex;flex-direction:column;gap:12px;min-height:100%}
+
+.row{display:flex;align-items:center;gap:9px}
+.grow{flex:1;min-width:0}
+.name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.muted{color:var(--soft);font-size:13px}
+.mono{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft)}
+
+/* Высота фиксирована: иначе смена текста двигала доску на каждый ход. */
+.status{min-height:54px;display:flex;flex-direction:column;justify-content:center}
+.status .t{font-family:var(--display);font-size:19px;font-weight:600}
+
+/* ---------- доска ---------- */
+.big{position:relative;display:grid;grid-template-columns:repeat(3,1fr);gap:var(--gapBig);aspect-ratio:1;user-select:none}
+.sb{position:relative;display:grid;grid-template-columns:repeat(3,1fr);gap:var(--gapCell);padding:2px;
+    border-radius:var(--radius);background:var(--card);border:1px solid var(--line);transition:background .15s,box-shadow .15s}
+.sb.live{background:color-mix(in srgb,var(--acc) 8%,var(--card));box-shadow:inset 0 0 0 1px var(--acc)}
+.sb.drawn{opacity:.4}
+.cell{all:unset;display:flex;align-items:center;justify-content:center;aspect-ratio:1;
+      min-width:0;min-height:0;overflow:hidden;border-radius:2px;cursor:default}
+.sb.live .cell:not(.f){cursor:pointer}
+.sb.live .cell:not(.f):hover{background:color-mix(in srgb,var(--acc) 14%,transparent)}
+.cell:focus-visible{outline:2px solid var(--acc);outline-offset:-2px}
+
+.mk{position:relative;width:58%;aspect-ratio:1;background:var(--skinA);clip-path:var(--shape);filter:var(--skinGlow)}
+.mk>i{position:absolute;left:26%;top:26%;width:48%;height:48%;background:var(--skinB);clip-path:var(--shape)}
+.mk.op{background:var(--oA);clip-path:var(--oShape);border-radius:var(--oRound);filter:none}
+.mk.op>i{background:var(--oB);clip-path:var(--oShape);border-radius:var(--oRound)}
+.mk.new{animation:place .26s cubic-bezier(.2,1.3,.4,1)}
+@keyframes place{0%{transform:scale(.4);opacity:0}70%{transform:scale(1.08)}100%{transform:scale(1);opacity:1}}
+
+.ov{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none}
+.ov .mk{width:52%}
+.trail{position:absolute;height:1.5px;background:var(--skinA);transform-origin:0 50%;opacity:.7;pointer-events:none;z-index:2;animation:draw .42s ease-out}
+@keyframes draw{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+
+/* Очередь показывается самим полем: волна пробегает по девяти клеткам. */
+.big.wave .sb{animation:wave 2.2s ease-in-out infinite;background:color-mix(in srgb,var(--acc) 12%,var(--card))}
+.big.wave .sb:nth-child(1){animation-delay:0s}    .big.wave .sb:nth-child(2){animation-delay:.14s}
+.big.wave .sb:nth-child(3){animation-delay:.28s}  .big.wave .sb:nth-child(4){animation-delay:.42s}
+.big.wave .sb:nth-child(5){animation-delay:.56s}  .big.wave .sb:nth-child(6){animation-delay:.7s}
+.big.wave .sb:nth-child(7){animation-delay:.84s}  .big.wave .sb:nth-child(8){animation-delay:.98s}
+.big.wave .sb:nth-child(9){animation-delay:1.12s}
+@keyframes wave{0%,70%,100%{opacity:.2}35%{opacity:1}}
+
+/* ---------- органы управления ---------- */
+.b{all:unset;display:block;text-align:center;padding:13px 16px;min-height:46px;border-radius:var(--radius);
+   border:1px solid var(--lineHi);cursor:pointer;font-weight:500;line-height:1.2}
+.b:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.b.p{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.b[disabled]{opacity:.45;cursor:default}
+.b:not(.p):hover{border-color:var(--ink)}
+.stack{display:flex;flex-direction:column;gap:8px}
+
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:13px 14px}
+.rate{display:flex;align-items:baseline;gap:8px}
+.rate .n{font-family:var(--display);font-size:28px;font-weight:700;line-height:1}
+.streak{display:flex;gap:2px;height:4px;margin-top:10px}
+.streak i{flex:1;display:block;border-radius:2px;background:var(--cell)}
+.streak i.on{background:var(--acc)}
+.streak i.rec{background:color-mix(in srgb,var(--acc) 30%,transparent)}
+
+.pal{display:grid;grid-template-columns:repeat(6,1fr);gap:5px;margin-top:8px}
+.pal button{all:unset;aspect-ratio:1;border-radius:var(--radius);cursor:pointer;box-shadow:inset 0 0 0 1px rgba(0,0,0,.2)}
+.pal button[aria-pressed="true"]{box-shadow:0 0 0 2px var(--bg),0 0 0 3px var(--ink)}
+.shapes{display:grid;grid-template-columns:repeat(6,1fr);gap:5px;margin-top:8px}
+.shapes button{all:unset;display:grid;place-items:center;min-height:44px;border:1px solid var(--line);
+                border-radius:var(--radius);cursor:pointer}
+.shapes button[aria-pressed="true"]{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 8%,transparent)}
+.shapes i{width:22px;height:22px;background:var(--soft)}
+.shapes button[aria-pressed="true"] i{background:var(--skinA)}
+.themes{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
+.themes button{all:unset;min-height:44px;display:grid;place-items:center;border-radius:var(--radius);
+               border:1px solid var(--line);cursor:pointer;font-family:var(--mono);font-size:9px;letter-spacing:.1em}
+.themes button[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+
+dialog{border:none;background:transparent;padding:0;max-width:430px;width:calc(100% - 28px)}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.sheet{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;
+       max-height:80vh;overflow:auto}
+.hidden{display:none!important}
+.code{font-family:var(--mono);font-size:28px;letter-spacing:.26em;text-indent:.26em;text-align:center;margin:8px 0}
+ol.top{list-style:none;margin:0;padding:0}
+ol.top li{display:flex;gap:10px;align-items:baseline;padding:9px 0;border-bottom:1px solid var(--line)}
+ol.top li:last-child{border:0}
+ol.top .r{font-family:var(--mono);font-size:10px;color:var(--soft);min-width:2ch}
+ol.top .v{font-family:var(--mono)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="row">
+    <div class="mk" id="myMark" style="width:20px;flex:0 0 20px"><i></i></div>
+    <span class="name grow" id="me">…</span>
+    <span class="muted" id="rate"></span>
+  </div>
+
+  <div class="status">
+    <div class="t" id="st">Подключение</div>
+    <div class="muted" id="hint">…</div>
+  </div>
+
+  <div class="big" id="big"></div>
+
+  <div class="stack" id="lobby">
+    <button class="b p" id="find">Найти соперника</button>
+    <div class="row" style="gap:8px">
+      <button class="b grow" id="invite">Позвать друга</button>
+      <button class="b grow" id="join">Ввести код</button>
+    </div>
+    <div class="row" style="gap:8px">
+      <button class="b grow" id="topBtn">Рейтинг</button>
+      <button class="b grow" id="look">Оформление</button>
+    </div>
+  </div>
+
+  <div class="stack hidden" id="ingame">
+    <button class="b" id="resign">Сдаться</button>
+  </div>
+
+  <div class="card hidden" id="rateCard">
+    <span class="mono">Ваш рейтинг</span>
+    <div class="rate"><span class="n" id="rNum">—</span><span class="muted" id="rBand"></span></div>
+    <div class="streak" id="streak"></div>
+    <div class="muted" id="streakNote" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<dialog id="dlg"><div class="sheet" id="sheet"></div></dialog>
+
+<script>
+'use strict';
+/* ─────────── правила: те же, что на сервере ─────────── */
+var X=1,O=2,DR=3,LINES=[7,56,448,73,146,292,273,84];
+function fresh(){return{c:new Array(81).fill(0),b:new Array(9).fill(0),turn:X,forced:-1,over:0,last:-1}}
+function winm(m){for(var i=0;i<8;i++)if((m&LINES[i])===LINES[i])return true;return false}
+function full(s,b){for(var i=0;i<9;i++)if(!s.c[b*9+i])return false;return true}
+function playable(s,b){return !s.over&&!s.b[b]&&(s.forced<0||s.forced===b)}
+function hasMove(s){for(var b=0;b<9;b++)if(playable(s,b)&&!full(s,b))return true;return false}
+function apply(s,mv){
+  var b=(mv/9)|0,c=mv%9,w=s.turn;
+  if(mv<0||mv>80||!playable(s,b)||s.c[mv])return false;
+  s.c[mv]=w;
+  var m=0,i;for(i=0;i<9;i++)if(s.c[b*9+i]===w)m|=1<<i;
+  if(winm(m))s.b[b]=w; else if(full(s,b))s.b[b]=DR;
+  var big=0;for(i=0;i<9;i++)if(s.b[i]===w)big|=1<<i;
+  if(winm(big))s.over=w;
+  else{var all=true;for(i=0;i<9;i++)if(!s.b[i])all=false;if(all)s.over=DR}
+  s.forced=(s.over||s.b[c])?-1:c;
+  s.turn=w===X?O:X;s.last=mv;
+  if(!s.over&&!hasMove(s))s.over=DR;
+  return true;
+}
+
+/* ─────────── скин ─────────── */
+var SHAPES=[
+ ['cross','polygon(20% 0%,50% 30%,80% 0%,100% 20%,70% 50%,100% 80%,80% 100%,50% 70%,20% 100%,0% 80%,30% 50%,0% 20%)'],
+ ['plus','polygon(35% 0%,65% 0%,65% 35%,100% 35%,100% 65%,65% 65%,65% 100%,35% 100%,35% 65%,0% 65%,0% 35%,35% 35%)'],
+ ['rhomb','polygon(50% 0%,100% 50%,50% 100%,0% 50%)'],
+ ['hex','polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%)'],
+ ['spark','polygon(50% 0%,61% 39%,100% 50%,61% 61%,50% 100%,39% 61%,0% 50%,39% 39%)'],
+ ['chev','polygon(50% 0%,100% 45%,100% 100%,50% 55%,0% 100%,0% 45%)'],
+ ['glass','polygon(10% 0%,90% 0%,55% 50%,90% 100%,10% 100%,45% 50%)'],
+ ['arrow','polygon(50% 0%,100% 50%,72% 50%,72% 100%,28% 100%,28% 50%,0% 50%)'],
+ ['shard','polygon(50% 0%,100% 35%,80% 100%,20% 100%,0% 35%)'],
+ ['star6','polygon(50% 0%,63% 30%,97% 25%,75% 50%,97% 75%,63% 70%,50% 100%,37% 70%,3% 75%,25% 50%,3% 25%,37% 30%)'],
+ ['round',''],
+ ['seal','polygon(50% 0%,93% 25%,93% 75%,50% 100%,7% 75%,7% 25%)']
+];
+var PAL=['var(--ink)','var(--acc)','#c8402c','#b3762f','#d4af37','#2e8b74','#2f4fd8','#7a4e8c','#7fb8c8','#2a2a2a','#fff','var(--soft)'];
+var THEMES=[['linza','ЛИНЗА'],['linzaDark','НОЧЬ'],['kamen','КАМЕНЬ'],['myata','МЯТА'],['list','ЛИСТ'],['grafit','ГРАФИТ']];
+
+var skin=[0,0,1,0], oppSkin=[10,5,1,0];
+function applySkin(){
+  var R=document.documentElement.style, sh=SHAPES[skin[0]]||SHAPES[0];
+  R.setProperty('--shape',sh[1]||'none');
+  R.setProperty('--skinA',PAL[skin[1]]||PAL[0]);
+  R.setProperty('--skinB',PAL[skin[2]]||'#fff');
+  R.setProperty('--skinGlow',(skin[3]&1)?'drop-shadow(0 0 5px '+(PAL[skin[1]]||PAL[0])+')':'none');
+  var osh=SHAPES[oppSkin[0]]||SHAPES[10];
+  R.setProperty('--oShape',osh[1]||'none');
+  R.setProperty('--oRound',osh[1]?'0':'50%');
+  R.setProperty('--oA',PAL[oppSkin[1]]||'var(--o)');
+  R.setProperty('--oB',PAL[oppSkin[2]]||'#fff');
+}
+
+/* ─────────── темы: качается только выбранная ─────────── */
+var themeCache={};
+/* Шрифты темы — отдельный CSS-чанк. Подключается один раз и только
+   для выбранной темы: тянуть все десять семейств незачем. Внутри
+   unicode-range, поэтому латиница и кириллица качаются раздельно. */
+function loadFonts(id){
+  if(document.getElementById('f-'+id))return;
+  var l=document.createElement('link');
+  l.id='f-'+id;l.rel='stylesheet';l.href='/f/'+id+'.css';
+  document.head.appendChild(l);
+}
+function applyTheme(id){
+  loadFonts(id);
+  if(id==='linza'){document.documentElement.removeAttribute('style');document.documentElement.dataset.theme=id;applySkin();save();return Promise.resolve()}
+  if(themeCache[id]){setVars(themeCache[id]);return Promise.resolve()}
+  return fetch('/t/'+id+'.json').then(function(r){return r.json()}).then(function(t){
+    themeCache[id]=t;setVars(t);
+  }).catch(function(){});
+}
+function setVars(t){
+  var R=document.documentElement.style,M={bg:'--bg',card:'--card',ink:'--ink',soft:'--soft',line:'--line',
+    lineHi:'--lineHi',cell:'--cell',accent:'--acc',x:'--x',o:'--o',radius:'--radius',gapBig:'--gapBig',
+    gapCell:'--gapCell',ls:'--ls',markW:'--markW'};
+  for(var k in M)if(t[k]!==undefined)R.setProperty(M[k],String(t[k]));
+  // шрифты темы применяем только если они реально есть в системе
+  document.documentElement.dataset.theme=t.id;
+  applySkin();save();
+}
+function save(){try{localStorage.setItem('uttt',JSON.stringify({t:document.documentElement.dataset.theme,s:skin}))}catch(e){}}
+/* Токен гостя: без него перезагрузка страницы теряла партию. */
+function guestToken(){
+  var k='uttt_g',v='';
+  try{v=localStorage.getItem(k)||''}catch(e){}
+  if(!/^[a-z0-9]{12}$/.test(v)){
+    v='';var A='abcdefghijklmnopqrstuvwxyz0123456789';
+    for(var i=0;i<12;i++)v+=A[(Math.random()*A.length)|0];
+    try{localStorage.setItem(k,v)}catch(e){}
+  }
+  return v;
+}
+function load(){try{var v=JSON.parse(localStorage.getItem('uttt')||'{}');if(v.s)skin=v.s;if(v.t)return v.t}catch(e){}return 'linza'}
+
+/* ─────────── доска ─────────── */
+var st=fresh(),side=0,big=document.getElementById('big'),cells=[],boards=[],trailEl=null;
+for(var b=0;b<9;b++){
+  var d=document.createElement('div');d.className='sb';var cs=[];
+  for(var c=0;c<9;c++){
+    var e=document.createElement('button');e.type='button';e.className='cell';
+    e.setAttribute('aria-label','поле '+(b+1)+', клетка '+(c+1));
+    (function(b,c){e.addEventListener('click',function(){move(b,c)})})(b,c);
+    d.appendChild(e);cs.push(e);
+  }
+  var ov=document.createElement('div');ov.className='ov';d.appendChild(ov);
+  big.appendChild(d);cells.push(cs);boards.push({d:d,ov:ov});
+}
+function markEl(who,isNew){
+  var m=document.createElement('div');
+  m.className='mk'+(who===side?'':' op')+(isNew?' new':'');
+  m.appendChild(document.createElement('i'));
+  return m;
+}
+function render(){
+  for(var b=0;b<9;b++){
+    var live=playable(st,b),bd=boards[b];
+    bd.d.className='sb'+(live?' live':'')+(st.b[b]===DR?' drawn':'');
+    for(var c=0;c<9;c++){
+      var v=st.c[b*9+c],el=cells[b][c];
+      if(el.dataset.v!==String(v)){
+        el.dataset.v=String(v);el.textContent='';
+        if(v){el.appendChild(markEl(v,st.last===b*9+c));el.classList.add('f')}
+        else el.classList.remove('f');
+      }
+      el.disabled=!live||!!v;
+    }
+    var bv=st.b[b];
+    if(bd.ov.dataset.v!==String(bv)){
+      bd.ov.dataset.v=String(bv);bd.ov.textContent='';
+      if(bv&&bv!==DR)bd.ov.appendChild(markEl(bv,false));
+    }
+  }
+  drawTrail();
+  var s=document.getElementById('st'),h=document.getElementById('hint');
+  if(!side){return}
+  if(st.over){
+    s.textContent=st.over===DR?'Ничья':(st.over===side?'Победа':'Поражение');
+    h.textContent='Партия окончена';
+  }else{
+    s.textContent=st.turn===side?'Ваш ход':'Ход соперника';
+    h.textContent=st.forced<0?'Любое открытое поле':'Только подсвеченное поле';
+  }
+}
+function drawTrail(){
+  if(trailEl){trailEl.remove();trailEl=null}
+  if(!(skin[3]&2)||st.last<0||st.forced<0||st.over)return;
+  var from=(st.last/9)|0,to=st.forced;
+  var cx=function(i){return ((i%3)+0.5)/3*100},cy=function(i){return (((i/3)|0)+0.5)/3*100};
+  var x1=cx(from),y1=cy(from),x2=cx(to),y2=cy(to),dx=x2-x1,dy=y2-y1;
+  var len=Math.sqrt(dx*dx+dy*dy);if(len<0.01)return;
+  trailEl=document.createElement('i');trailEl.className='trail';
+  trailEl.style.left=x1+'%';trailEl.style.top=y1+'%';trailEl.style.width=len+'%';
+  trailEl.style.transform='rotate('+(Math.atan2(dy,dx)*180/Math.PI)+'deg)';
+  big.appendChild(trailEl);
+}
+
+/* ─────────── связь ─────────── */
+var sock=null,retry=0,inGame=false,myName='',myRate=0,streakVal=0,bestVal=0,sparks=0;
+function send(o){if(sock&&sock.readyState===1)sock.send(JSON.stringify(o))}
+function setPhase(g){
+  inGame=g;
+  document.getElementById('lobby').classList.toggle('hidden',g);
+  document.getElementById('ingame').classList.toggle('hidden',!g);
+  document.getElementById('rateCard').classList.toggle('hidden',g);
+}
+function status(t,h){document.getElementById('st').textContent=t;document.getElementById('hint').textContent=h||''}
+
+var ERR={
+  bad_index:'Такой клетки нет',
+  illegal:'Сюда сейчас нельзя',
+  not_your_turn:'Сейчас ход соперника',
+  in_game:'Сначала закончите текущую партию',
+  invite_not_found:'Кода нет. Проверьте шесть символов — в них не бывает нуля, единицы, «I» и «O»',
+  invite_expired:'Код устарел: приглашение живёт 15 минут',
+  invite_self:'Это ваш собственный код',
+  host_offline:'Друг сейчас не в сети. Код сработает, когда он вернётся',
+  host_busy:'Друг уже играет',
+  rate_limited:'Слишком много действий подряд. Пара секунд — и продолжим',
+  bad_hash:'Telegram не передал данные профиля. Помогает перезапуск приложения',
+  empty_init_data:'Откройте игру через Telegram',
+  no_room:'Партии нет'
+};
+
+function connect(){
+  var proto=location.protocol==='https:'?'wss://':'ws://';
+  sock=new WebSocket(proto+location.host+'/ws');
+  sock.onopen=function(){
+    retry=0;
+    var d='';try{d=(window.Telegram&&Telegram.WebApp&&Telegram.WebApp.initData)||''}catch(e){}
+    send({t:'hello',d:d,g:guestToken()});
+  };
+  sock.onmessage=function(ev){
+    var m;try{m=JSON.parse(ev.data)}catch(e){return}
+    if(m.t==='welcome'){
+      myName=m.n;myRate=m.r;streakVal=m.st||0;bestVal=m.bs||0;sparks=m.sp||0;
+      if(m.sk&&m.sk.length===4){skin=m.sk;applySkin()}
+      document.getElementById('me').textContent=m.n;
+      document.getElementById('rate').textContent=m.r+(m.p?'?':'');
+      document.getElementById('rNum').textContent=m.r+(m.p?'?':'');
+      document.getElementById('rBand').textContent=m.lo+'…'+m.hi;
+      renderStreak();
+      setPhase(false);status('Готовы играть','Партия идёт минут пять');
+    }
+    else if(m.t==='queued'){big.classList.add('wave');status('Ищем соперника','в очереди '+m.n+' · отмена по кнопке')}
+    else if(m.t==='start'){
+      big.classList.remove('wave');
+      st=fresh();side=m.s==='X'?X:O;
+      if(m.osk&&m.osk.length===4){oppSkin=m.osk;applySkin()}
+      setPhase(true);render();
+      status(st.turn===side?'Ваш ход':'Ход соперника','соперник: '+m.o+' · '+m.r+(m.re?' · партия восстановлена':''));
+    }
+    else if(m.t==='m'){apply(st,m.v);render()}
+    else if(m.t==='over'){
+      render();setPhase(false);
+      var w=m.w==='-'?'Ничья':(m.w===(side===X?'X':'O')?'Победа':'Поражение');
+      var why={mate:'',resign:'по сдаче',disconnect:'соперник не вернулся',draw:''}[m.why]||'';
+      status(w,why);
+      streakVal=(m.w!=='-'&&m.w===(side===X?'X':'O'))?streakVal+1:0;
+      if(streakVal>bestVal)bestVal=streakVal;
+      renderStreak();
+    }
+    else if(m.t==='gone'){status('Соперник пропал','ждём '+m.s+' секунд — если не вернётся, победа ваша')}
+    else if(m.t==='invite'){showInvite(m.code)}
+    else if(m.t==='top'){showTop(m.rows)}
+    else if(m.t==='unqueued'){big.classList.remove('wave');status('Готовы играть','')}
+    else if(m.t==='err'){
+      big.classList.remove('wave');
+      var txt=ERR[m.e]||('Ошибка: '+m.e);
+      document.getElementById('hint').textContent=txt;
+    }
+  };
+  sock.onclose=function(){
+    big.classList.remove('wave');
+    status(inGame?'Связь потеряна':'Нет связи',inGame?'Партия сохранена, переподключаемся':'Переподключаемся');
+    retry=Math.min(retry+1,5);
+    setTimeout(connect,600*retry);
+  };
+}
+function move(b,c){
+  if(!inGame||st.over||st.turn!==side||!playable(st,b)||st.c[b*9+c])return;
+  send({t:'move',b:b,c:c});
+}
+function renderStreak(){
+  var el=document.getElementById('streak');el.textContent='';
+  for(var i=0;i<20;i++){
+    var d=document.createElement('i');
+    if(i<streakVal)d.className='on';else if(i<bestVal)d.className='rec';
+    el.appendChild(d);
+  }
+  document.getElementById('streakNote').textContent=
+    streakVal?(streakVal+' подряд · рекорд '+bestVal+' · '+sparks+' искр'):('рекорд '+bestVal+' · '+sparks+' искр');
+}
+
+/* ─────────── шторки ─────────── */
+var dlg=document.getElementById('dlg'),sheet=document.getElementById('sheet');
+function openSheet(build){sheet.textContent='';build(sheet);if(!dlg.open)dlg.showModal()}
+function h(tag,cls,text){var e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+function closeBtn(root){var b=h('button','b','Закрыть');b.addEventListener('click',function(){dlg.close()});root.appendChild(b)}
+
+function showInvite(code){
+  openSheet(function(r){
+    r.appendChild(h('span','mono','Код приглашения'));
+    r.appendChild(h('div','code',code));
+    r.appendChild(h('div','muted','Действует 15 минут. Друг вводит его кнопкой «Ввести код».'));
+    var c=h('button','b p','Скопировать');
+    c.addEventListener('click',function(){
+      try{navigator.clipboard.writeText(code);c.textContent='Скопировано'}catch(e){}
+    });
+    c.style.marginTop='12px';r.appendChild(c);closeBtn(r);
+  });
+}
+function showTop(rows){
+  openSheet(function(r){
+    r.appendChild(h('span','mono','Рейтинг игроков'));
+    if(!rows.length){r.appendChild(h('div','muted','Пока пусто — сыграйте рейтинговую партию.'));closeBtn(r);return}
+    var ol=h('ol','top');
+    rows.forEach(function(x,i){
+      var li=h('li');
+      li.appendChild(h('span','r',String(i+1)));
+      li.appendChild(h('span','name grow',x[0]));   // textContent — разметка не исполнится
+      li.appendChild(h('span','v',x[1]+(x[2]?'?':'')));
+      ol.appendChild(li);
+    });
+    r.appendChild(ol);closeBtn(r);
+  });
+}
+function showJoin(){
+  openSheet(function(r){
+    r.appendChild(h('span','mono','Код друга'));
+    var inp=document.createElement('input');
+    inp.maxLength=6;inp.autocapitalize='characters';inp.placeholder='K7QM2X';
+    inp.style.cssText='width:100%;font:600 24px var(--mono);letter-spacing:.2em;text-align:center;padding:12px;margin:10px 0;border:1px solid var(--lineHi);border-radius:var(--radius);background:var(--bg);color:var(--ink)';
+    r.appendChild(inp);
+    var go=h('button','b p','Войти');
+    go.addEventListener('click',function(){
+      var v=(inp.value||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+      if(v.length!==6){inp.style.borderColor='var(--o)';return}
+      send({t:'join',code:v});dlg.close();
+    });
+    r.appendChild(go);closeBtn(r);
+    setTimeout(function(){inp.focus()},50);
+  });
+}
+function showLook(){
+  openSheet(function(r){
+    r.appendChild(h('span','mono','Тема'));
+    var tw=h('div','themes');
+    THEMES.forEach(function(t){
+      var b=h('button',null,t[1]);
+      b.setAttribute('aria-pressed',document.documentElement.dataset.theme===t[0]?'true':'false');
+      b.addEventListener('click',function(){
+        applyTheme(t[0]).then(function(){
+          [].forEach.call(tw.children,function(x){x.setAttribute('aria-pressed','false')});
+          b.setAttribute('aria-pressed','true');
+        });
+      });
+      tw.appendChild(b);
+    });
+    r.appendChild(tw);
+
+    r.appendChild(h('span','mono','Форма знака'));
+    var sw=h('div','shapes');
+    SHAPES.forEach(function(s,i){
+      var b=h('button');b.setAttribute('aria-pressed',skin[0]===i?'true':'false');
+      var ic=h('i');ic.style.clipPath=s[1]||'none';ic.style.borderRadius=s[1]?'0':'50%';
+      b.appendChild(ic);
+      b.addEventListener('click',function(){
+        skin[0]=i;applySkin();pushSkin();
+        [].forEach.call(sw.children,function(x){x.setAttribute('aria-pressed','false')});
+        b.setAttribute('aria-pressed','true');refreshMarks();
+      });
+      sw.appendChild(b);
+    });
+    r.appendChild(sw);
+
+    ['Основной цвет','Дополнительный'].forEach(function(label,slot){
+      r.appendChild(h('span','mono',label));
+      var pw=h('div','pal');
+      PAL.forEach(function(col,i){
+        var b=h('button');b.style.background=col;
+        b.setAttribute('aria-pressed',skin[slot+1]===i?'true':'false');
+        b.addEventListener('click',function(){
+          skin[slot+1]=i;applySkin();pushSkin();
+          [].forEach.call(pw.children,function(x){x.setAttribute('aria-pressed','false')});
+          b.setAttribute('aria-pressed','true');refreshMarks();
+        });
+        pw.appendChild(b);
+      });
+      r.appendChild(pw);
+    });
+
+    r.appendChild(h('span','mono','Эффекты'));
+    var fx=h('div','stack');fx.style.marginTop='8px';
+    [['Блик',1],['След хода',2]].forEach(function(p){
+      var b=h('button','b',p[0]+((skin[3]&p[1])?' · включён':' · выключен'));
+      b.addEventListener('click',function(){
+        skin[3]^=p[1];applySkin();pushSkin();
+        b.textContent=p[0]+((skin[3]&p[1])?' · включён':' · выключен');
+        render();
+      });
+      fx.appendChild(b);
+    });
+    r.appendChild(fx);
+    closeBtn(r);
+  });
+}
+function refreshMarks(){
+  for(var b=0;b<9;b++){
+    for(var c=0;c<9;c++)cells[b][c].dataset.v='';
+    boards[b].ov.dataset.v='';
+  }
+  render();
+}
+function pushSkin(){send({t:'skin',s0:skin[0],s1:skin[1],s2:skin[2],s3:skin[3]});save()}
+
+document.getElementById('find').addEventListener('click',function(){send({t:'queue'})});
+document.getElementById('invite').addEventListener('click',function(){send({t:'invite'})});
+document.getElementById('join').addEventListener('click',showJoin);
+document.getElementById('topBtn').addEventListener('click',function(){send({t:'top'})});
+document.getElementById('look').addEventListener('click',showLook);
+document.getElementById('resign').addEventListener('click',function(){
+  openSheet(function(r){
+    r.appendChild(h('div','name','Сдаться?'));
+    r.appendChild(h('div','muted','Партия засчитается как поражение и повлияет на рейтинг.'));
+    var y=h('button','b p','Да, сдаюсь');y.style.marginTop='12px';
+    y.addEventListener('click',function(){send({t:'resign'});dlg.close()});
+    r.appendChild(y);closeBtn(r);
+  });
+});
+dlg.addEventListener('click',function(e){if(e.target===dlg)dlg.close()});
+
+/* ─────────── старт ─────────── */
+try{if(window.Telegram&&Telegram.WebApp){Telegram.WebApp.ready();Telegram.WebApp.expand()}}catch(e){}
+var startTheme=load();
+applySkin();renderStreak();render();
+applyTheme(startTheme);
+// код приглашения из диплинка
+var inv=(location.search.match(/[?&]inv=([A-Za-z0-9]{6})/)||[])[1];
+connect();
+if(inv)setTimeout(function(){send({t:'join',code:inv.toUpperCase()})},700);
+</script>
+</body>
+</html>

@@ -1,11 +1,9 @@
 meta:
-  environment: node
-  toolchain:
-    name: npm
-    version: "20"
+  environment: docker
 build:
-  skip: false
+  dockerfile: Dockerfile
 run:
-  scriptName: src/index.js
-  containerPort: 80
+  # Рейтинги и логи партий должны пережить перезапуск: файловая система
+  # контейнера эфемерна, поэтому DATA_DIR указывает сюда.
   persistenceMount: /data
+  containerPort: 80
