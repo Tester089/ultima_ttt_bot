@@ -1,0 +1,1888 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+<script>
+/* ============================================================
+   Запасной рантайм для DC-компонента.
+   Включается ТОЛЬКО если ./support.js не загрузился — то есть
+   когда файл открыт как обычный HTML, а не внутри Claude Design.
+   Реализует ровно то подмножество, что использует этот кит:
+   {{ путь }} в тексте и атрибутах, style / style-hover / onClick /
+   onChange / disabled / value, <sc-for list as>, <sc-if value>,
+   <x-dc>, <helmet>, class Component extends DCLogic + setState.
+   ============================================================ */
+(function () {
+  'use strict';
+
+  var BIND = /^\s*\{\{\s*([\w$.]+)\s*\}\}\s*$/;
+  var INLINE = /\{\{\s*([\w$.]+)\s*\}\}/g;
+
+  function look(path, scope, vals) {
+    var parts = path.split('.');
+    var cur = Object.prototype.hasOwnProperty.call(scope, parts[0]) ? scope : vals;
+    for (var i = 0; i < parts.length; i++) {
+      if (cur == null) return undefined;
+      cur = cur[parts[i]];
+    }
+    return cur;
+  }
+
+  function text(str, scope, vals) {
+    return str.replace(INLINE, function (_, p) {
+      var v = look(p, scope, vals);
+      return v == null ? '' : String(v);
+    });
+  }
+
+  function applyStyle(el, obj) {
+    if (!obj || typeof obj !== 'object') return;
+    for (var k in obj) {
+      if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+      var v = obj[k];
+      if (v == null) continue;
+      // Никакой автоподстановки 'px': в ките все длины уже строки с единицами,
+      // а числа — это безразмерные свойства (lineHeight, fontWeight, opacity,
+      // zIndex, flex). Добавление px ломало межстрочный интервал.
+      var kebab = k.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); });
+      if (k.indexOf('webkit') === 0) kebab = '-' + kebab;
+
+      el.style.setProperty(kebab, v);
+
+      // Некоторые движки не знают свойство через CSSOM и молча его теряют
+      // (background-clip:text, -webkit-text-stroke). Дописываем в атрибут
+      // напрямую — браузер разберёт его сам.
+      if (el.style.getPropertyValue(kebab) === '' && String(v) !== '') {
+        el.setAttribute('style', (el.getAttribute('style') || '') + kebab + ':' + v + ';');
+      }
+    }
+  }
+
+  /** Раскрывает один узел шаблона в ноль или больше живых узлов. */
+  function build(node, scope, vals, out) {
+    if (node.nodeType === 3) {
+      var t = node.nodeValue;
+      if (t.indexOf('{{') === -1) {
+        if (t.trim()) out.push(document.createTextNode(t));
+      } else {
+        out.push(document.createTextNode(text(t, scope, vals)));
+      }
+      return;
+    }
+    if (node.nodeType !== 1) return;
+
+    var tag = node.tagName.toLowerCase();
+
+    if (tag === 'sc-for') {
+      var m = BIND.exec(node.getAttribute('list') || '');
+      var list = m ? look(m[1], scope, vals) : null;
+      var as = node.getAttribute('as') || 'item';
+      if (Array.isArray(list)) {
+        for (var i = 0; i < list.length; i++) {
+          var inner = Object.create(scope);
+          inner[as] = list[i];
+          inner[as + 'Index'] = i;
+          for (var c = 0; c < node.childNodes.length; c++) build(node.childNodes[c], inner, vals, out);
+        }
+      }
+      return;
+    }
+
+    if (tag === 'sc-if') {
+      var mv = BIND.exec(node.getAttribute('value') || '');
+      if (mv && look(mv[1], scope, vals)) {
+        for (var j = 0; j < node.childNodes.length; j++) build(node.childNodes[j], scope, vals, out);
+      }
+      return;
+    }
+
+    if (tag === 'x-dc' || tag === 'helmet') {
+      for (var h = 0; h < node.childNodes.length; h++) build(node.childNodes[h], scope, vals, out);
+      return;
+    }
+
+    var el = document.createElement(tag);
+    var attrs = node.attributes;
+
+    for (var a = 0; a < attrs.length; a++) {
+      var name = attrs[a].name;
+      var raw = attrs[a].value;
+      var bm = BIND.exec(raw);
+      var val = bm ? look(bm[1], scope, vals) : null;
+
+      if (name === 'style') {
+        if (bm) applyStyle(el, val); else el.setAttribute('style', raw);
+      } else if (name === 'style-hover') {
+        if (bm && val && Object.keys(val).length) {
+          (function (el, hover, base) {
+            el.addEventListener('mouseenter', function () { applyStyle(el, hover); });
+            el.addEventListener('mouseleave', function () { applyStyle(el, base); });
+          })(el, val, bm ? look(BIND.exec(node.getAttribute('style') || '')[1], scope, vals) : {});
+        }
+      } else if (name === 'onclick') {
+        if (typeof val === 'function') el.addEventListener('click', val);
+      } else if (name === 'onchange') {
+        if (typeof val === 'function') el.addEventListener('input', val);
+      } else if (name === 'disabled') {
+        if (val) el.setAttribute('disabled', '');
+      } else if (name.indexOf('hint-') === 0) {
+        /* подсказка редактора — в браузере не нужна */
+      } else {
+        el.setAttribute(name, bm ? (val == null ? '' : String(val)) : text(raw, scope, vals));
+      }
+    }
+
+    var kids = [];
+    for (var k = 0; k < node.childNodes.length; k++) build(node.childNodes[k], scope, vals, kids);
+    for (var q = 0; q < kids.length; q++) el.appendChild(kids[q]);
+
+    out.push(el);
+  }
+
+  function DCLogic() {}
+  DCLogic.prototype.setState = function (patch) {
+    var next = typeof patch === 'function' ? patch(this.state) : patch;
+    this.state = Object.assign({}, this.state, next);
+    if (this.__mount) this.__mount();
+  };
+  function boot() {
+    // Страховка: если настоящий рантайм Claude Design уже отработал,
+    // элемента x-dc либо нет, либо в нём не осталось нераскрытых {{ }}.
+    // В этом случае молча уходим и ничего не трогаем.
+    if (window.DCLogic && window.DCLogic !== DCLogic) return;
+    var root = document.querySelector('x-dc');
+    if (!root || root.innerHTML.indexOf('{{') === -1) return;
+    window.DCLogic = DCLogic;
+
+    // helmet со шрифтами и базовым CSS переезжает в <head>
+    var helmet = root.querySelector('helmet');
+    if (helmet) {
+      while (helmet.firstChild) document.head.appendChild(helmet.firstChild);
+      helmet.remove();
+    }
+
+    var tpl = root.cloneNode(true);
+    var host = document.createElement('div');
+    root.replaceWith(host);
+
+    var src = document.querySelector('script[data-dc-script]');
+    if (!src) return;
+
+    // eslint-disable-next-line no-new-func
+    var Component = new Function(src.textContent + '\nreturn Component;')();
+    var inst = new Component();
+    if (!(inst instanceof DCLogic)) Object.setPrototypeOf(Component.prototype, DCLogic.prototype);
+
+    inst.__mount = function () {
+      var vals = inst.renderVals();
+      var out = [];
+      for (var i = 0; i < tpl.childNodes.length; i++) build(tpl.childNodes[i], Object.create(null), vals, out);
+      host.replaceChildren.apply(host, out);
+    };
+    inst.__mount();
+  }
+
+  // Ждём и загрузку, и шанс настоящего рантайма отработать первым.
+  function schedule() { setTimeout(boot, 500); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', schedule);
+  else schedule();
+})();
+</script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="true">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Inter+Tight:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Spectral:wght@300;400;500;600&family=Archivo:wght@400;500;600;700&family=Roboto+Slab:wght@400;500;600;700&family=Unbounded:wght@400;500;600;700&family=Comfortaa:wght@400;500;600;700&family=Nunito:wght@400;500;600;700&family=Commissioner:wght@300;400;500;600&family=Alegreya:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0c0c0e;-webkit-font-smoothing:antialiased}
+/* Очередь показывается самим полем: волна пробегает по девяти клеткам
+   большой сетки. Это не спиннер, а та же геометрия, что и в партии. */
+@keyframes dcWave{0%,70%,100%{opacity:.16}35%{opacity:1}}
+@keyframes gPulse{0%,100%{transform:scale(1)}45%{transform:scale(1.14)}}
+@keyframes gRise{0%{transform:translateY(4px);opacity:0}60%,100%{transform:translateY(0);opacity:1}}
+@keyframes gDraw{0%{clip-path:inset(0 100% 0 0)}70%,100%{clip-path:inset(0 0 0 0)}}
+@keyframes gGlow{0%,100%{opacity:.35}50%{opacity:1}}
+@keyframes gTick{0%,100%{transform:translateX(0)}25%{transform:translateX(-2px)}75%{transform:translateX(2px)}}
+@keyframes gBreathe{0%,100%{opacity:.55;transform:scale(.97)}50%{opacity:1;transform:scale(1)}}
+@keyframes gSeal{0%{transform:scale(1.5) rotate(-8deg);opacity:0}55%,100%{transform:scale(1) rotate(0);opacity:1}}
+@keyframes gPlace{0%{transform:scale(.4);opacity:0}70%{transform:scale(1.08)}100%{transform:scale(1);opacity:1}}
+@keyframes gTrail{0%{clip-path:inset(0 100% 0 0);opacity:0}100%{clip-path:inset(0 0 0 0);opacity:.75}}
+@keyframes gSweep{0%{transform:translateX(-100%)}60%,100%{transform:translateX(100%)}}
+@keyframes dcHold{0%,100%{opacity:.5}50%{opacity:.85}}
+@media (prefers-reduced-motion:reduce){*{animation:none !important}}
+</style>
+</helmet>
+<div style="{{ s.page }}">
+
+  <header style="{{ s.bar }}">
+    <div style="{{ s.barTitle }}">ULTIMATE TIC TAC TOE · QUIET KIT</div>
+    <div style="{{ s.barRow }}">
+      <span style="{{ s.barKey }}">тема</span>
+      <div style="{{ s.barTabs }}">
+        <sc-for list="{{ tabs }}" as="tab" hint-placeholder-count="6">
+          <button style="{{ tab.style }}" style-hover="{{ tab.hover }}" onClick="{{ tab.onClick }}">{{ tab.label }}</button>
+        </sc-for>
+      </div>
+    </div>
+    <div style="{{ s.barRow }}">
+      <span style="{{ s.barKey }}">рейтинг</span>
+      <div style="{{ s.barTabs }}">
+        <sc-for list="{{ canonTabs }}" as="ct" hint-placeholder-count="7">
+          <button style="{{ ct.style }}" style-hover="{{ ct.hover }}" onClick="{{ ct.onClick }}">{{ ct.label }}</button>
+        </sc-for>
+      </div>
+    </div>
+  </header>
+
+  <section style="{{ s.doctrine }}">
+    <div style="{{ s.docTitle }}">Парадигма кита</div>
+    <ol style="{{ s.docList }}">
+      <sc-for list="{{ doctrine }}" as="d" hint-placeholder-count="5">
+        <li style="{{ s.docItem }}"><b style="{{ s.docStrong }}">{{ d.head }}</b> {{ d.body }}</li>
+      </sc-for>
+    </ol>
+  </section>
+
+  <section style="{{ s.briefBlock }}">
+    <div style="{{ s.briefName }}">{{ theme.name }}</div>
+    <p style="{{ s.briefText }}">{{ theme.idea }}</p>
+    <div style="{{ s.axesRow }}">
+      <span style="{{ s.axisWon }}"><span style="{{ s.axisK }}">взятое поле</span>{{ theme.wonName }}</span>
+      <span style="{{ s.axisWon }}"><span style="{{ s.axisK }}">рейтинг</span>{{ rating.canonName }}</span>
+      <sc-for list="{{ axes }}" as="a" hint-placeholder-count="3">
+        <span style="{{ s.axis }}"><span style="{{ s.axisK }}">{{ a.k }}</span>{{ a.v }}</span>
+      </sc-for>
+    </div>
+  </section>
+
+  <div style="{{ s.screens }}">
+
+    <div style="{{ s.col }}">
+      <div style="{{ s.cap }}">Партия · 390 × 800</div>
+      <div style="{{ s.phone }}">
+        <div style="{{ s.phoneInner }}">
+          <div style="{{ s.matchHead }}">
+            <div style="{{ s.side }}">
+              <span style="{{ s.markSmO }}">{{ marks.o }}</span>
+              <span style="{{ s.sideName }}">Марина</span>
+            </div>
+            <div style="{{ s.sideRight }}">
+              <span style="{{ s.sideName }}">Вы</span>
+              <span style="{{ s.markSmX }}">{{ marks.x }}</span>
+            </div>
+          </div>
+
+          <div style="{{ s.statusRow }}">
+            <span style="{{ s.statusText }}">{{ statusText }}</span>
+            <span style="{{ s.statusHint }}">{{ hintText }}</span>
+          </div>
+
+          <div style="{{ s.bigGrid }}">
+            <sc-if value="{{ trail.show }}"><i style="{{ trail.style }}"></i></sc-if>
+            <sc-for list="{{ boards }}" as="brd" hint-placeholder-count="9">
+              <div style="{{ brd.style }}">
+                <sc-for list="{{ brd.cells }}" as="cel" hint-placeholder-count="9">
+                  <button style="{{ cel.style }}" style-hover="{{ cel.hover }}" onClick="{{ cel.onClick }}" disabled="{{ cel.disabled }}">
+                    <sc-if value="{{ cel.hasMark }}"><i style="{{ cel.markOuter }}"><i style="{{ cel.markInner }}"></i></i></sc-if>
+                  </button>
+                </sc-for>
+                <sc-if value="{{ brd.showGlyph }}"><div style="{{ brd.glyphStyle }}"><i style="{{ brd.shapeOuter }}"><i style="{{ brd.shapeInner }}"></i></i></div></sc-if>
+                <sc-if value="{{ brd.showStrike }}"><i style="{{ brd.strikeStyle }}"></i></sc-if>
+                <sc-if value="{{ brd.showCorner }}"><div style="{{ brd.cornerStyle }}"><i style="{{ brd.shapeOuter }}"><i style="{{ brd.shapeInner }}"></i></i></div></sc-if>
+                <sc-if value="{{ brd.showSeal }}"><div style="{{ brd.sealStyle }}"><i style="{{ brd.shapeOuter }}"><i style="{{ brd.shapeInner }}"></i></i></div></sc-if>
+              </div>
+            </sc-for>
+          </div>
+
+          <div style="{{ s.footBar }}">
+            <button style="{{ s.btnQuiet }}" style-hover="{{ s.btnQuietHover }}" onClick="{{ undo }}">Отменить</button>
+            <button style="{{ s.btnMain }}" style-hover="{{ s.btnMainHover }}" onClick="{{ reset }}">Заново</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="{{ s.col }}">
+      <div style="{{ s.cap }}">Лобби · канон рейтинга «{{ rating.canonName }}»</div>
+      <div style="{{ s.phone }}">
+        <div style="{{ s.phoneInner }}">
+          <div style="{{ s.lobbyTopRow }}">
+            <span style="{{ s.eyebrow }}">{{ theme.eyebrow }}</span>
+          </div>
+          <div style="{{ s.playerRow }}">
+            <div style="{{ player.markOuter }}"><i style="{{ player.markInner }}"></i></div>
+            <span style="{{ player.nameStyle }}">{{ player.name }}</span>
+            <div style="{{ s.badgeRow }}">
+              <sc-for list="{{ player.badges }}" as="pb" hint-placeholder-count="3">
+                <span style="{{ pb.style }}">{{ pb.glyph }}</span>
+              </sc-for>
+            </div>
+          </div>
+          <div style="{{ s.lobbyTitle }}">{{ theme.title }}</div>
+
+          <div style="{{ s.ratingCard }}" style-hover="{{ s.ratingCardHover }}">
+            <span style="{{ s.eyebrow }}">{{ rating.label }}</span>
+            <div style="{{ s.ratingHeadRow }}">
+              <span style="{{ s.ratingBig }}">{{ rating.big }}</span>
+              <span style="{{ s.ratingSuffix }}">{{ rating.suffix }}</span>
+            </div>
+
+            <sc-if value="{{ rating.isSegs }}">
+              <div style="{{ s.segRow }}">
+                <sc-for list="{{ rating.segs }}" as="sg" hint-placeholder-count="6">
+                  <i style="{{ sg.style }}"></i>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ rating.isBars }}">
+              <div style="{{ s.barsRow }}">
+                <sc-for list="{{ rating.bars }}" as="br" hint-placeholder-count="10">
+                  <i style="{{ br.style }}"></i>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ rating.isRing }}">
+              <div style="{{ s.ringWrap }}">
+                <div style="{{ rating.ringStyle }}"><div style="{{ s.ringHole }}">{{ rating.ringText }}</div></div>
+                <div style="{{ s.ringSide }}">{{ rating.ringSide }}</div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ rating.isBand }}">
+              <div style="{{ s.bandWrap }}">
+                <div style="{{ s.bandTrack }}"><i style="{{ rating.bandStyle }}"></i><i style="{{ rating.bandTickStyle }}"></i></div>
+                <div style="{{ s.bandScale }}"><span>{{ rating.bandLo }}</span><span>{{ rating.bandHi }}</span></div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ rating.isLadder }}">
+              <div style="{{ s.ladderWrap }}">
+                <sc-for list="{{ rating.ladder }}" as="ld" hint-placeholder-count="3">
+                  <div style="{{ ld.style }}"><span style="{{ ld.whoStyle }}">{{ ld.who }}</span><span style="{{ ld.gapStyle }}">{{ ld.gap }}</span></div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <div style="{{ s.ttl }}">{{ rating.note }}</div>
+            <div style="{{ s.cardLinkRow }}">
+              <span style="{{ s.cardLink }}">Рейтинг игроков</span>
+              <span style="{{ s.cardLinkArrow }}">→</span>
+            </div>
+          </div>
+
+          <div style="{{ s.streakStrip }}">
+            <div style="{{ s.streakTop }}">
+              <span style="{{ s.streakNum }}">{{ streak.cur }}</span>
+              <span style="{{ s.streakWord }}">{{ streak.word }}</span>
+              <span style="{{ s.streakBest }}">{{ streak.bestLabel }} · {{ streak.sparkLabel }}</span>
+            </div>
+            <div style="{{ s.streakTrack }}">
+              <sc-for list="{{ streak.dots }}" as="sd" hint-placeholder-count="20">
+                <i style="{{ sd.style }}"></i>
+              </sc-for>
+            </div>
+            <div style="{{ s.streakNext }}">{{ streak.nextLabel }}</div>
+          </div>
+
+          <div style="{{ s.lobbyActions }}">
+            <button style="{{ s.btnBig }}" style-hover="{{ s.btnBigHover }}">Найти соперника</button>
+            <button style="{{ s.btnRow }}" style-hover="{{ s.btnRowHover }}">Позвать друга</button>
+            <button style="{{ s.btnRow }}" style-hover="{{ s.btnRowHover }}">Настройки</button>
+            <button style="{{ s.btnRow }}" style-hover="{{ s.btnRowHover }}">Как это работает</button>
+          </div>
+
+          <div style="{{ s.inviteBlock }}">
+            <span style="{{ s.eyebrow }}">Код комнаты</span>
+            <div style="{{ s.codeRow }}"><span style="{{ s.code }}">K7QM2X</span><span style="{{ s.ttl }}">15:00</span></div>
+          </div>
+        </div>
+
+
+      </div>
+    </div>
+
+    <div style="{{ s.col }}">
+      <div style="{{ s.cap }}">Рейтинг игроков · 390 × 800</div>
+      <div style="{{ s.phone }}">
+        <div style="{{ s.phoneInner }}">
+            <div style="{{ s.settingsHead }}">
+              <span style="{{ s.settingsTitle }}">Рейтинг игроков</span>
+            </div>
+
+            <div style="{{ s.settingsScroll }}">
+              <div style="{{ s.ratingCardStatic }}">
+                <span style="{{ s.eyebrow }}">{{ rating.label }}</span>
+                <div style="{{ s.ratingHeadRow }}">
+                  <span style="{{ s.ratingBig }}">{{ rating.big }}</span>
+                  <span style="{{ s.ratingSuffix }}">{{ rating.suffix }}</span>
+                </div>
+                <sc-if value="{{ rating.isSegs }}">
+                  <div style="{{ s.segRow }}">
+                    <sc-for list="{{ rating.segs }}" as="sg" hint-placeholder-count="6"><i style="{{ sg.style }}"></i></sc-for>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ rating.isBars }}">
+                  <div style="{{ s.barsRow }}">
+                    <sc-for list="{{ rating.bars }}" as="br" hint-placeholder-count="10"><i style="{{ br.style }}"></i></sc-for>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ rating.isRing }}">
+                  <div style="{{ s.ringWrap }}">
+                    <div style="{{ rating.ringStyle }}"><div style="{{ s.ringHole }}">{{ rating.ringText }}</div></div>
+                    <div style="{{ s.ringSide }}">{{ rating.ringSide }}</div>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ rating.isBand }}">
+                  <div style="{{ s.bandWrap }}">
+                    <div style="{{ s.bandTrack }}"><i style="{{ rating.bandStyle }}"></i><i style="{{ rating.bandTickStyle }}"></i></div>
+                    <div style="{{ s.bandScale }}"><span>{{ rating.bandLo }}</span><span>{{ rating.bandHi }}</span></div>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ rating.isLadder }}">
+                  <div style="{{ s.ladderWrap }}">
+                    <sc-for list="{{ rating.ladder }}" as="ld" hint-placeholder-count="3">
+                      <div style="{{ ld.style }}"><span style="{{ ld.whoStyle }}">{{ ld.who }}</span><span style="{{ ld.gapStyle }}">{{ ld.gap }}</span></div>
+                    </sc-for>
+                  </div>
+                </sc-if>
+                <div style="{{ s.ttl }}">Место {{ rating.placeTo }} из 12 480</div>
+              </div>
+
+              <div style="{{ s.listHead }}"><span>{{ rating.tableHead }}</span><span>{{ rating.tableUnit }}</span></div>
+              <div style="{{ s.list }}">
+                <sc-for list="{{ top }}" as="row" hint-placeholder-count="6">
+                  <div style="{{ row.style }}">
+                    <span style="{{ row.rankStyle }}">{{ row.rank }}</span>
+                    <span style="{{ s.who }}">{{ row.who }}</span>
+                    <span style="{{ s.wl }}">{{ row.wl }}</span>
+                    <span style="{{ s.r }}">{{ row.r }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="{{ s.col }}">
+      <div style="{{ s.cap }}">Настройки · 390 × 800</div>
+      <div style="{{ s.phone }}">
+        <div style="{{ s.phoneInner }}">
+            <div style="{{ s.settingsHead }}">
+              <span style="{{ s.settingsTitle }}">Настройки</span>
+            </div>
+
+            <div style="{{ s.settingsScroll }}">
+             <div style="{{ s.settingsCard }}">
+              <div style="{{ s.setGroup }}">
+                <span style="{{ s.eyebrow }}">Тема</span>
+                <div style="{{ s.themeGrid }}">
+                  <sc-for list="{{ themeSwatches }}" as="ts" hint-placeholder-count="7">
+                    <button style="{{ ts.style }}" style-hover="{{ ts.hover }}" onClick="{{ ts.onClick }}">
+                      <span style="{{ ts.markStyle }}">{{ ts.mark }}</span>
+                      <span style="{{ ts.nameStyle }}">{{ ts.label }}</span>
+                    </button>
+                  </sc-for>
+                </div>
+              </div>
+
+              <div style="{{ s.setGroup }}">
+                <span style="{{ s.eyebrow }}">Звук и вибрация</span>
+                <sc-for list="{{ toggles }}" as="tg" hint-placeholder-count="2">
+                  <div style="{{ s.toggleRow }}">
+                    <span style="{{ s.toggleLbl }}">{{ tg.label }}</span>
+                    <button style="{{ tg.track }}" onClick="{{ tg.onClick }}"><i style="{{ tg.knob }}"></i></button>
+                  </div>
+                </sc-for>
+              </div>
+
+              <div style="{{ s.setGroup }}">
+                <span style="{{ s.eyebrow }}">Скорость анимаций</span>
+                <div style="{{ s.segCtrl }}">
+                  <sc-for list="{{ speedOpts }}" as="sp" hint-placeholder-count="3">
+                    <button style="{{ sp.style }}" style-hover="{{ sp.hover }}" onClick="{{ sp.onClick }}">{{ sp.label }}</button>
+                  </sc-for>
+                </div>
+              </div>
+
+              <div style="{{ s.setGroup }}">
+                <div style="{{ s.sliderHeadRow }}"><span style="{{ s.eyebrow }}">Таймер хода</span><span style="{{ s.sliderVal }}">{{ timerLabel }}</span></div>
+                <input type="range" min="10" max="60" step="5" value="{{ settings.timer }}" onChange="{{ onTimer }}" style="{{ s.slider }}" />
+              </div>
+
+              <div style="{{ s.setGroup }}">
+                <span style="{{ s.eyebrow }}">Язык</span>
+                <div style="{{ s.segCtrl }}">
+                  <sc-for list="{{ langOpts }}" as="lg" hint-placeholder-count="2">
+                    <button style="{{ lg.style }}" style-hover="{{ lg.hover }}" onClick="{{ lg.onClick }}">{{ lg.label }}</button>
+                  </sc-for>
+                </div>
+              </div>
+             </div>
+            </div>
+
+            <button style="{{ s.logoutBtn }}" style-hover="{{ s.logoutBtnHover }}">Выйти из аккаунта</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="{{ s.col }}">
+      <div style="{{ s.cap }}">Итог партии</div>
+      <div style="{{ s.phone }}">
+        <div style="{{ s.phoneInner }}">
+          <div style="{{ s.resultBlock }}">
+            <span style="{{ s.eyebrow }}">Партия окончена</span>
+            <div style="{{ s.resultWord }}">{{ theme.win }}</div>
+            <div style="{{ s.placeRow }}">
+              <span style="{{ s.placeNum }}">{{ rating.placeFrom }}</span>
+              <span style="{{ s.placeArrow }}">→</span>
+              <span style="{{ s.placeNum }}">{{ rating.placeTo }}</span>
+              <span style="{{ s.placeDelta }}">{{ rating.placeDelta }}</span>
+            </div>
+            <div style="{{ s.placeLbl }}">место · {{ rating.canonName }}</div>
+          </div>
+
+          <div style="{{ s.resultExtra }}">
+            <div style="{{ s.variantHead }}">
+              <sc-for list="{{ resultTabs }}" as="rt" hint-placeholder-count="4">
+                <button style="{{ rt.style }}" style-hover="{{ rt.hover }}" onClick="{{ rt.onClick }}">{{ rt.label }}</button>
+              </sc-for>
+            </div>
+
+            <sc-if value="{{ showVarA }}">
+              <div style="{{ s.varCard }}">
+                <div style="{{ s.oppRow }}">
+                  <span style="{{ s.oppMark }}">{{ marks.o }}</span>
+                  <div style="{{ s.oppInfo }}">
+                    <span style="{{ s.oppName }}">Марина</span>
+                    <span style="{{ s.oppRecord }}">Личные встречи 5 · 3</span>
+                  </div>
+                </div>
+                <div style="{{ s.varBtnRow }}">
+                  <button style="{{ s.btnBig }}" style-hover="{{ s.btnBigHover }}">Реванш</button>
+                  <button style="{{ s.btnRow }}" style-hover="{{ s.btnRowHover }}">Новый соперник</button>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ showVarB }}">
+              <div style="{{ s.statGrid }}">
+                <sc-for list="{{ matchStats }}" as="ms" hint-placeholder-count="3">
+                  <div style="{{ s.statTile }}">
+                    <span style="{{ s.statVal }}">{{ ms.val }}</span>
+                    <span style="{{ s.statLbl }}">{{ ms.label }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ showVarC }}">
+              <div style="{{ s.varCard }}">
+                <div style="{{ s.streakLine }}">{{ streakText }}</div>
+                <div style="{{ s.segRow }}">
+                  <sc-for list="{{ streakDots }}" as="sd" hint-placeholder-count="5">
+                    <i style="{{ sd.style }}"></i>
+                  </sc-for>
+                </div>
+                <div style="{{ s.ttl }}">До дневной цели ещё 2 победы.</div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ showVarD }}">
+              <div style="{{ s.recapWrap }}">
+                <div style="{{ s.recapGrid }}">
+                  <sc-for list="{{ recap }}" as="rc" hint-placeholder-count="9">
+                    <i style="{{ rc.style }}"></i>
+                  </sc-for>
+                </div>
+                <div style="{{ s.ttl }}">Финальная позиция партии</div>
+              </div>
+            </sc-if>
+          </div>
+
+          <div style="{{ s.listHead }}"><span>{{ rating.tableHead }}</span><span>{{ rating.tableUnit }}</span></div>
+          <div style="{{ s.list }}">
+            <sc-for list="{{ top }}" as="row" hint-placeholder-count="6">
+              <div style="{{ row.style }}">
+                <span style="{{ row.rankStyle }}">{{ row.rank }}</span>
+                <span style="{{ s.who }}">{{ row.who }}</span>
+                <span style="{{ s.wl }}">{{ row.wl }}</span>
+                <span style="{{ s.r }}">{{ row.r }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="{{ s.col }}">
+      <div style="{{ s.cap }}">Состояния · {{ qs.code }}</div>
+
+      <div style="{{ s.qsPicker }}">
+        <sc-for list="{{ qsTabs }}" as="qt" hint-placeholder-count="10">
+          <button style="{{ qt.style }}" style-hover="{{ qt.hover }}" onClick="{{ qt.onClick }}">{{ qt.label }}</button>
+        </sc-for>
+      </div>
+
+      <div style="{{ s.phone }}">
+        <div style="{{ s.phoneInner }}">
+
+          <div style="{{ s.matchHead }}">
+            <div style="{{ s.side }}">
+              <span style="{{ qs.oppMarkStyle }}">{{ qs.oppMark }}</span>
+              <span style="{{ qs.oppNameStyle }}">{{ qs.oppName }}</span>
+            </div>
+            <div style="{{ s.sideRight }}">
+              <span style="{{ s.sideName }}">Вы</span>
+              <span style="{{ s.markSmX }}">{{ marks.x }}</span>
+            </div>
+          </div>
+
+          <div style="{{ s.statusRow }}">
+            <span style="{{ qs.titleStyle }}">{{ qs.title }}</span>
+            <span style="{{ s.statusHint }}">{{ qs.hint }}</span>
+          </div>
+
+          <sc-if value="{{ qs.isBoard }}">
+            <div style="{{ s.bigGrid }}">
+            <sc-if value="{{ trail.show }}"><i style="{{ trail.style }}"></i></sc-if>
+              <sc-for list="{{ qs.boards }}" as="qb" hint-placeholder-count="9">
+                <div style="{{ qb.style }}">
+                  <sc-for list="{{ qb.cells }}" as="qc" hint-placeholder-count="9">
+                    <span style="{{ qc.style }}">{{ qc.val }}</span>
+                  </sc-for>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ qs.isCode }}">
+            <div style="{{ s.codeStage }}">
+              <div style="{{ s.codeSlots }}">
+                <sc-for list="{{ qs.slots }}" as="sl" hint-placeholder-count="6">
+                  <div style="{{ sl.style }}">{{ sl.val }}</div>
+                </sc-for>
+              </div>
+              <div style="{{ qs.captionStyle }}">{{ qs.caption }}</div>
+            </div>
+          </sc-if>
+
+          <div style="{{ s.qsFoot }}">
+            <div style="{{ s.qsMeter }}">
+              <sc-for list="{{ qs.meter }}" as="mt" hint-placeholder-count="9">
+                <i style="{{ mt.style }}"></i>
+              </sc-for>
+            </div>
+            <div style="{{ s.qsMeterLbl }}">{{ qs.meterLabel }}</div>
+            <sc-if value="{{ qs.hasAction }}">
+              <button style="{{ s.btnBig }}" style-hover="{{ s.btnBigHover }}">{{ qs.action }}</button>
+            </sc-if>
+            <sc-if value="{{ qs.hasQuiet }}">
+              <button style="{{ s.btnRow }}" style-hover="{{ s.btnRowHover }}">{{ qs.quiet }}</button>
+            </sc-if>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <div style="{{ s.col }}">
+      <div style="{{ s.cap }}">Скин · {{ shapeName }} · {{ player.sparks }} искр</div>
+
+      <div style="{{ s.themedPanel }}">
+      <div style="{{ s.sparkCtl }}">
+        <span style="{{ s.sparkCtlLbl }}">искр у игрока</span>
+        <sc-for list="{{ sparkPresets }}" as="sp" hint-placeholder-count="5">
+          <button style="{{ sp.style }}" style-hover="{{ sp.hover }}" onClick="{{ sp.onClick }}">{{ sp.label }}</button>
+        </sc-for>
+      </div>
+
+      <div style="{{ s.skinStage }}">
+        <div style="{{ skinPreview.outer }}"><i style="{{ skinPreview.inner }}"></i></div>
+      </div>
+
+      <span style="{{ s.eyebrow }}">Форма</span>
+      <div style="{{ s.shapeGrid }}">
+        <sc-for list="{{ shapeGrid }}" as="sg" hint-placeholder-count="12">
+          <button style="{{ sg.style }}" style-hover="{{ sg.hover }}" onClick="{{ sg.onClick }}">
+            <i style="{{ sg.glyphStyle }}"></i>
+            <span style="{{ sg.priceStyle }}">{{ sg.price }}</span>
+          </button>
+        </sc-for>
+      </div>
+
+      <span style="{{ s.eyebrow }}">Основной цвет</span>
+      <div style="{{ s.palGrid }}">
+        <sc-for list="{{ palA }}" as="pa" hint-placeholder-count="12">
+          <button style="{{ pa.style }}" onClick="{{ pa.onClick }}"></button>
+        </sc-for>
+      </div>
+
+      <span style="{{ s.eyebrow }}">Дополнительный</span>
+      <div style="{{ s.palGrid }}">
+        <sc-for list="{{ palB }}" as="pb" hint-placeholder-count="12">
+          <button style="{{ pb.style }}" onClick="{{ pb.onClick }}"></button>
+        </sc-for>
+      </div>
+
+      <span style="{{ s.eyebrow }}">Эффекты</span>
+      <div style="{{ s.fxList }}">
+        <sc-for list="{{ fxRow }}" as="fx" hint-placeholder-count="2">
+          <button style="{{ fx.style }}" onClick="{{ fx.onClick }}">
+            <span style="{{ fx.labelStyle }}">{{ fx.label }}</span>
+            <span style="{{ fx.noteStyle }}">{{ fx.note }}</span>
+          </button>
+        </sc-for>
+      </div>
+      </div>
+    </div>
+
+    <div style="{{ s.col }}">
+      <div style="{{ s.cap }}">Значки · за поступки, не за время</div>
+      <div style="{{ s.badgeBox }}">
+        <sc-for list="{{ badges }}" as="bd" hint-placeholder-count="12">
+          <div style="{{ bd.style }}">
+            <span style="{{ bd.glyphStyle }}">{{ bd.glyph }}</span>
+            <div>
+              <div style="{{ bd.nameStyle }}">{{ bd.name }}</div>
+              <div style="{{ bd.howStyle }}">{{ bd.how }}</div>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="{{ s.colWide }}">
+      <div style="{{ s.cap }}">Детали и токены</div>
+      <div style="{{ s.specPanel }}">
+        <div style="{{ s.specGroup }}">
+          <span style="{{ s.eyebrow }}">Состояния клетки</span>
+          <div style="{{ s.stateRow }}">
+            <sc-for list="{{ states }}" as="stt" hint-placeholder-count="5">
+              <div style="{{ s.stateItem }}"><div style="{{ stt.box }}">{{ stt.val }}</div><span style="{{ s.stateLbl }}">{{ stt.label }}</span></div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="{{ s.specGroup }}">
+          <span style="{{ s.eyebrow }}">Цвет</span>
+          <div style="{{ s.swRow }}">
+            <sc-for list="{{ swatches }}" as="sw" hint-placeholder-count="6">
+              <div style="{{ s.sw }}"><i style="{{ sw.bar }}"></i><span style="{{ s.swLbl }}">{{ sw.label }}</span></div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="{{ s.specGroup }}">
+          <span style="{{ s.eyebrow }}">Типографика</span>
+          <div style="{{ s.typeRow }}"><span style="{{ s.typeLbl }}">заголовок</span><span style="{{ s.sampleD }}">Ход соперника</span></div>
+          <div style="{{ s.typeRow }}"><span style="{{ s.typeLbl }}">текст</span><span style="{{ s.sampleB }}">Вас отправили в правое верхнее поле</span></div>
+          <div style="{{ s.typeRowL }}"><span style="{{ s.typeLbl }}">знаки</span><span style="{{ s.sampleMarks }}"><span style="{{ s.markBigX }}">{{ marks.x }}</span><span style="{{ s.markBigO }}">{{ marks.o }}</span></span></div>
+        </div>
+        <div style="{{ s.specGroup }}">
+          <span style="{{ s.eyebrow }}">Взятое поле — {{ theme.wonName }}</span>
+          <p style="{{ s.wonLabName }}">{{ theme.wonNote }}</p>
+          <div style="{{ s.labGrid }}">
+            <sc-for list="{{ wonLab }}" as="lb" hint-placeholder-count="3">
+              <div style="{{ s.labItem }}">
+                <div style="{{ lb.boardStyle }}">
+                  <sc-for list="{{ lb.cells }}" as="lc" hint-placeholder-count="9">
+                    <span style="{{ lc.style }}">{{ lc.val }}</span>
+                  </sc-for>
+                  <sc-if value="{{ lb.showGlyph }}"><div style="{{ lb.glyphStyle }}"><i style="{{ lb.shapeOuter }}"><i style="{{ lb.shapeInner }}"></i></i></div></sc-if>
+                  <sc-if value="{{ lb.showStrike }}"><i style="{{ lb.strikeStyle }}"></i></sc-if>
+                  <sc-if value="{{ lb.showCorner }}"><div style="{{ lb.cornerStyle }}"><i style="{{ lb.shapeOuter }}"><i style="{{ lb.shapeInner }}"></i></i></div></sc-if>
+                  <sc-if value="{{ lb.showSeal }}"><div style="{{ lb.sealStyle }}"><i style="{{ lb.shapeOuter }}"><i style="{{ lb.shapeInner }}"></i></i></div></sc-if>
+                </div>
+                <span style="{{ s.labLbl }}">{{ lb.label }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="{{ s.specGroup }}">
+          <span style="{{ s.eyebrow }}">Правила направления</span>
+          <ul style="{{ s.ruleList }}">
+            <sc-for list="{{ rules }}" as="r" hint-placeholder-count="4">
+              <li style="{{ s.ruleItem }}">{{ r.t }}</li>
+            </sc-for>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:1200}}">
+const DOCTRINE = [
+  { head:'Экран принадлежит полю.', body:'81 клетка — единственный тяжёлый объект в кадре. Статус, счёт и кнопки отступают и не спорят с полем по контрасту.' },
+  { head:'Ноль декора.', body:'Ни свечений, ни градиентов, ни рамок ради рамок. Направления отличаются пропорцией, весом линии, ритмом отступов и поведением одного акцента.' },
+  { head:'Деталь вместо графики.', body:'Проработка живёт в мелком: состояния клетки, форма знака, момент взятия поля, «?» у неточного рейтинга, переходы 120 мс.' },
+  { head:'Мобильный — первый.', body:'Одна колонка, поле от края до края, зона пальца снизу, ничего мельче 11px, кнопка не ниже 46px.' },
+  { head:'Акцент — это смысл.', body:'Цветом помечено только одно: куда можно ходить сейчас. Он не украшает и не появляется дважды в разных ролях.' }
+];
+
+const T = [
+  { id:'linza', name:'ЛИНЗА', win:'Победа', eyebrow:'Партия', title:'Крест\nи круг',
+    idea:'Базовая геометрия кита: клетки без границ, разделены воздухом и подложкой. Знаки — тонкий крест и незакрашенное кольцо, поле читается как схема.',
+    rules:['знак ✕ / ○, кегль 0.66 клетки','клетка — подложка без границ','активное поле — контур вокруг клетки','радиус 4'],
+    bg:'#f6f6f7', card:'#ffffff', cell:'#e2e5ea', ink:'#191a1c', soft:'#6e7175', line:'#dcdee2', lineHi:'#c3c6cc',
+    accent:'#0c8060', x:'#191a1c', o:'#0c7457', radius:'4px', gapBig:'10px', gapCell:'3px',
+    display:"'IBM Plex Sans', sans-serif", body:"'IBM Plex Sans', sans-serif", mono:"'IBM Plex Mono', monospace",
+    markFont:"'IBM Plex Sans', sans-serif", markW:400, markSize:26, markX:'✕', markO:'○',
+    active:'ring', caps:false, ls:'-.01em',
+    won:'glyph', wonName:'Знак поверх', wonNote:'клетки гаснут, знак ложится крупно и полупрозрачно' },
+
+  { id:'linzaDark', name:'ЛИНЗА · НОЧЬ', win:'Победа', eyebrow:'Партия', title:'Для экрана\nв темноте',
+    idea:'Та же геометрия на почти чёрном под OLED. Текст приглушён, вся яркость отдана знакам и активному полю — ночная схема, от которой не устают глаза.',
+    rules:['фон #08090a','текст не ярче 78%','яркость только у знаков','радиус 6'],
+    bg:'#08090a', card:'#101214', cell:'#171a1c', ink:'#dfe3e6', soft:'#787e82', line:'#1b1e20', lineHi:'#2b2f32',
+    accent:'#8a7cff', x:'#eef1f4', o:'#8a7cff', radius:'6px', gapBig:'8px', gapCell:'3px',
+    display:"'Unbounded', sans-serif", body:"'Manrope', sans-serif", mono:"'IBM Plex Mono', monospace",
+    markFont:"'Unbounded', sans-serif", markW:500, markSize:22, markX:'✕', markO:'○',
+    active:'ring', caps:false, ls:'-.01em',
+    won:'invert', wonName:'Инверсия', wonNote:'поле заливается цветом владельца, знак вырезан фоном' },
+
+  { id:'kamen', name:'КАМЕНЬ', win:'Победа', eyebrow:'Партия', title:'Спокойно\nи насовсем',
+    idea:'Тёплый серый камень, три тона и очень сдержанная терракота. Премиальная лёгкость: ничего не блестит, всё выровнено по одной сетке.',
+    rules:['тёплый серый, 3 тона','подписи 11px','акцент терракота 8%','радиус 3'],
+    bg:'#e9e7e2', card:'#f3f1ed', cell:'#d6d1c6', ink:'#26241f', soft:'#68655d', line:'#d2cec4', lineHi:'#b3aea2',
+    accent:'#9a563a', x:'#26241f', o:'#89472c', radius:'3px', gapBig:'10px', gapCell:'3px',
+    display:"'Roboto Slab', serif", body:"'Archivo', sans-serif", mono:"'IBM Plex Mono', monospace",
+    markFont:"'Roboto Slab', serif", markW:600, markSize:24, markX:'✕', markO:'○',
+    active:'wash', caps:false, ls:'-.005em',
+    won:'seal', wonName:'Печать', wonNote:'клетки уходят в 25%, сверху — круглая печать со знаком' },
+
+  { id:'myata', name:'МЯТА', win:'Победа', eyebrow:'Партия', title:'Много воздуха,\nмало линий',
+    idea:'Светлый тёплый фон и зазоры вдвое больше обычного. Границ нет вовсе — поля разделены пустотой. Самый дышащий вариант кита.',
+    rules:['зазор ×2','границ нет','активное поле — мягкая заливка','радиус 10'],
+    bg:'#f1f3ef', card:'#fafbf8', cell:'#e8ebe5', ink:'#1e2320', soft:'#656d68', line:'#e4e8e1', lineHi:'#ccd3c9',
+    accent:'#2d7857', x:'#1e2320', o:'#2b7354', radius:'10px', gapBig:'13px', gapCell:'4px',
+    display:"'Comfortaa', sans-serif", body:"'Nunito', sans-serif", mono:"'IBM Plex Mono', monospace",
+    markFont:"'Comfortaa', sans-serif", markW:500, markSize:22, markX:'✕', markO:'○',
+    active:'fill', caps:false, ls:'-.01em',
+    won:'dots', wonName:'Точки', wonNote:'клетки превращаются в девять точек цвета владельца' },
+
+  { id:'list', name:'ЛИСТ', win:'Победа', eyebrow:'Партия', title:'Девять полей,\nодно решение',
+    idea:'Светлая бумага и волосяная линия. Поле выглядит начерченным: подложка клеток почти незаметна, работает только ритм пустот.',
+    rules:['подложка клетки на 6% темнее бумаги','активное поле — фон 8% акцента','знак тонкий, кегль 0.66','радиус 0'],
+    bg:'#f4f3f0', card:'#fbfaf8', cell:'#e2dfd7', ink:'#1b1b19', soft:'#6d6c68', line:'#d8d6cf', lineHi:'#bab8b0',
+    accent:'#3355ff', x:'#1b1b19', o:'#2f4eeb', radius:'0px', gapBig:'10px', gapCell:'3px',
+    display:"'Commissioner', sans-serif", body:"'Manrope', sans-serif", mono:"'IBM Plex Mono', monospace",
+    markFont:"'Commissioner', sans-serif", markW:400, markSize:25, markX:'✕', markO:'○',
+    active:'wash', caps:false, ls:'-.01em',
+    won:'strike', wonName:'Линия', wonNote:'знак не накладывается — проводится линия через три клетки' },
+
+  { id:'grafit', name:'ГРАФИТ', win:'Победа', eyebrow:'Партия', title:'Тише, чем\nкажется',
+    idea:'Тёмный нейтрал без синевы. Ни одного цветного пикселя, кроме подсветки хода: знаки различаются весом и светлотой, а не цветом.',
+    rules:['без цвета в знаках','активное поле — рамка 1px','контраст текста ступенями 3','радиус 2'],
+    bg:'#141414', card:'#1b1b1a', cell:'#222221', ink:'#eceae6', soft:'#868481', line:'#262624', lineHi:'#3a3a37',
+    accent:'#d8d3c8', x:'#f4f2ee', o:'#8f8c86', radius:'2px', gapBig:'8px', gapCell:'3px',
+    display:"'Inter Tight', sans-serif", body:"'Inter Tight', sans-serif", mono:"'IBM Plex Mono', monospace",
+    markFont:"'Inter Tight', sans-serif", markW:500, markSize:25, markX:'✕', markO:'○',
+    active:'ring', caps:false, ls:'0',
+    won:'corner', wonName:'Уголок', wonNote:'ходы остаются видны, владелец — маленькой меткой в углу' }
+];
+
+const RATING = {
+  confidence: { canonName:'Доверительный интервал', label:'Ваш рейтинг', big:'1247', suffix:'± 37',
+    kind:'band', note:'Пока сыграно 10 партий, показываем диапазон. Он сужается с каждой игрой.',
+    bandLo:'1210', bandHi:'1284', tableHead:'диапазон игроков', tableUnit:'± точность',
+    placeFrom:812, placeTo:774 },
+  tier: { canonName:'Дивизионы', label:'Дивизион', big:'Серебро', suffix:'III',
+    kind:'segs', segsTotal:5, segsFill:3, note:'До Серебра II осталось 2 победы. Дивизион не падает ниже Серебра IV.',
+    tableHead:'дивизион', tableUnit:'делений', placeFrom:2140, placeTo:2058 },
+  percentile: { canonName:'Процентиль', label:'Вы сильнее', big:'78', suffix:'% игроков',
+    kind:'ring', ringText:'78%', ringSide:'Из 12 480 активных игроков вы примерно 2 750-й.',
+    note:'Процентиль честнее числа: он не растёт от инфляции рейтинга.',
+    tableHead:'процентиль', tableUnit:'место', placeFrom:2801, placeTo:2750 },
+  stars: { canonName:'Мастерство поля', label:'Освоено', big:'6', suffix:'из 9 полей',
+    kind:'segs', segsTotal:9, segsFill:6, note:'Мастерство растёт за победы в каждом из девяти малых полей отдельно.',
+    tableHead:'освоено полей', tableUnit:'из 9', placeFrom:341, placeTo:298 },
+  chart: { canonName:'График формы', label:'Форма за 10 партий', big:'+62', suffix:'за неделю',
+    kind:'bars', bars:[38,52,44,61,49,72,58,80,66,88], note:'Число рейтинга спрятано в подпись: важнее направление кривой.',
+    tableHead:'форма', tableUnit:'за 10 игр', placeFrom:560, placeTo:481 },
+  streak: { canonName:'Серии', label:'Серия побед', big:'4', suffix:'подряд',
+    kind:'bars', bars:[20,20,88,88,88,88,20,88,88,88], note:'Лучшая серия — 9. Рейтинг считается, но игроку показывается ритм.',
+    tableHead:'серия', tableUnit:'подряд', placeFrom:205, placeTo:178 },
+  ladder: { canonName:'Лестница', label:'Ваше место', big:'127', suffix:'из 12 480',
+    kind:'ladder', note:'Видно только ближайших соседей: обогнать одного человека понятнее, чем набрать 40 очков.',
+    tableHead:'соседи по лестнице', tableUnit:'разрыв', placeFrom:134, placeTo:127 }
+};
+
+const LINES=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+// '-' (ничья) НЕ образует линию: три ничейных поля в ряд — не конец партии.
+function winInfo(a){
+  for(let i=0;i<LINES.length;i++){ const l=LINES[i], v=a[l[0]];
+    if(v && v!=='-' && v===a[l[1]] && v===a[l[2]]) return { v:v, li:i }; }
+  return a.every(Boolean) ? { v:'-', li:-1 } : null;
+}
+function fresh(){ const c=[]; for(let i=0;i<9;i++) c.push([null,null,null,null,null,null,null,null,null]); return c; }
+const POS=['левое верхнее','верхнее','правое верхнее','левое','центральное','правое','левое нижнее','нижнее','правое нижнее'];
+
+const TOPS = {
+  confidence:[['1','Марина','1682 ± 12'],['2','Тимур','1590 ± 15'],['3','Даша','1533 ± 19'],['4','Вы','1247 ± 37'],['5','Олег','1198 ± 22'],['6','Ким','1104 ± 31']],
+  tier:[['1','Марина','Алмаз I'],['2','Тимур','Алмаз III'],['3','Даша','Платина I'],['4','Вы','Серебро III'],['5','Олег','Серебро IV'],['6','Ким','Бронза I']],
+  percentile:[['1','Марина','99%'],['2','Тимур','96%'],['3','Даша','92%'],['4','Вы','78%'],['5','Олег','71%'],['6','Ким','54%']],
+  stars:[['1','Марина','9 / 9'],['2','Тимур','8 / 9'],['3','Даша','8 / 9'],['4','Вы','6 / 9'],['5','Олег','5 / 9'],['6','Ким','3 / 9']],
+  chart:[['1','Марина','+140'],['2','Тимур','+96'],['3','Даша','+71'],['4','Вы','+62'],['5','Олег','−18'],['6','Ким','−44']],
+  streak:[['1','Марина','12 подряд'],['2','Тимур','9 подряд'],['3','Даша','6 подряд'],['4','Вы','4 подряд'],['5','Олег','2 подряд'],['6','Ким','1 подряд']],
+  ladder:[['118','Соня','+31'],['119','Артур','+24'],['126','Лена','+4'],['127','Вы','—'],['128','Гоша','−3'],['131','Рим','−12']]
+};
+
+class Component extends DCLogic {
+  state = { dir:'linza', canon:'confidence', qsel:'queued',
+    streakVal:7, sparksVal:140, shape:'cross', colA:'x', colB:'acc', glow:false, trail:false, cells:fresh(), boards:Array(9).fill(null), wins:Array(9).fill(-1), turn:'X', forced:null, over:null, last:null, history:[],
+    resultVariant:'a', settingsOpen:false, ratingOpen:false, settings:{ sound:true, vibration:false, speed:'normal', timer:30, lang:'ru' } };
+
+  playable(b, st){ st=st||this.state; if(st.over||st.boards[b]) return false; return st.forced===null||st.forced===b; }
+  hasMove(st){ for(let b=0;b<9;b++){ if(!this.playable(b,st)) continue; for(let c=0;c<9;c++) if(!st.cells[b][c]) return true; } return false; }
+  play=(b,c)=>()=>{ const st=this.state; if(!this.playable(b,st)||st.cells[b][c]) return;
+    const cells=st.cells.map(r=>r.slice()); cells[b][c]=st.turn;
+    const boards=st.boards.slice(), wins=st.wins.slice();
+    const w=winInfo(cells[b]); if(w){ boards[b]=w.v; wins[b]=w.li; }
+    const big=winInfo(boards); const over = big ? big.v : null;
+    const next={ cells, boards, wins, forced:(boards[c]||over)?null:c, turn:st.turn==='X'?'O':'X', over,
+      last:{ b:b, c:c },
+      history:st.history.concat([{b,c,forced:st.forced,bw:st.boards[b],bwl:st.wins[b],turn:st.turn,last:st.last}]) };
+    if(!over && !this.hasMove(Object.assign({},st,next))) next.over='-';
+    this.setState(next); };
+  undo=()=>{ const st=this.state,h=st.history[st.history.length-1]; if(!h) return;
+    const cells=st.cells.map(r=>r.slice()); cells[h.b][h.c]=null;
+    const boards=st.boards.slice(); boards[h.b]=h.bw;
+    const wins=st.wins.slice(); wins[h.b]=h.bwl;
+    this.setState({cells,boards,wins,forced:h.forced,turn:h.turn,over:null,last:h.last||null,history:st.history.slice(0,-1)}); };
+  reset=()=>this.setState({cells:fresh(),boards:Array(9).fill(null),wins:Array(9).fill(-1),turn:'X',forced:null,over:null,history:[], last:null });
+  pick=(id)=>()=>this.setState({dir:id});
+  pickCanon=(id)=>()=>this.setState({canon:id});
+  pickQs=(id)=>()=>this.setState({qsel:id});
+  setShape=(id)=>()=>this.setState({shape:id});
+  setCol=(slot,id)=>()=>this.setState(slot==='A'?{colA:id}:{colB:id});
+  toggleFx=(k)=>()=>this.setState(s=>({ [k]: !s[k] }));
+  setSparks=(v)=>()=>this.setState({ sparksVal:v });
+  bumpStreak=(d)=>()=>this.setState(s=>({ streakVal: Math.max(0, Math.min(20, s.streakVal + d)) }));
+  setResultVariant=(id)=>()=>this.setState({resultVariant:id});
+  openSettings=()=>this.setState({settingsOpen:true});
+  closeSettings=()=>this.setState({settingsOpen:false});
+  openRating=()=>this.setState({ratingOpen:true});
+  closeRating=()=>this.setState({ratingOpen:false});
+  toggleSetting=(key)=>()=>this.setState(s=>({settings:Object.assign({},s.settings,{[key]:!s.settings[key]})}));
+  setSpeed=(v)=>()=>this.setState(s=>({settings:Object.assign({},s.settings,{speed:v})}));
+  setLang=(v)=>()=>this.setState(s=>({settings:Object.assign({},s.settings,{lang:v})}));
+  onTimer=(e)=>{ const v=Number(e.target.value); this.setState(s=>({settings:Object.assign({},s.settings,{timer:v})})); };
+
+  strikeStyle(t, li, col){
+    const base = { position:'absolute', display:'block', background:col, borderRadius:'2px', pointerEvents:'none', zIndex:3 };
+    if(li>=0 && li<=2) return Object.assign(base,{ left:'8%', right:'8%', height:'2px', top:['16.6%','50%','83.3%'][li], transform:'translateY(-50%)' });
+    if(li>=3 && li<=5) return Object.assign(base,{ top:'8%', bottom:'8%', width:'2px', left:['16.6%','50%','83.3%'][li-3], transform:'translateX(-50%)' });
+    // диагональ длиннее стороны в √2 раз: 88% не хватало, чтобы дойти до углов
+    return Object.assign(base,{ left:'-11%', width:'122%', height:'2px', top:'50%', transform:'translateY(-50%) rotate('+(li===6?45:-45)+'deg)' });
+  }
+
+  wonLook(t, bv, li, mark, skin, ownCol){
+    const mode = t.won;
+    // В лаборатории образцов скина игрока нет — рисуем нейтральную фигуру
+    // из цветов темы, чтобы витрина режимов работала сама по себе.
+    skin = skin || function(mine, size, invert){
+      const own = mine ? t.x : t.o;
+      return { outer:{ position:'relative', width:size, aspectRatio:'1', background: invert ? t.bg : own,
+                 clipPath: mine ? 'polygon(20% 0%,50% 30%,80% 0%,100% 20%,70% 50%,100% 80%,80% 100%,50% 70%,20% 100%,0% 80%,30% 50%,0% 20%)' : 'none',
+                 borderRadius: mine ? '0' : '50%' },
+               inner:{ position:'absolute', left:'26%', top:'26%', width:'48%', height:'48%',
+                 background: invert ? own : t.card,
+                 clipPath: mine ? 'polygon(20% 0%,50% 30%,80% 0%,100% 20%,70% 50%,100% 80%,80% 100%,50% 70%,20% 100%,0% 80%,30% 50%,0% 20%)' : 'none',
+                 borderRadius: mine ? '0' : '50%' } };
+    };
+    // Цвет владения тоже берётся из скина: черта, подложка и рамка
+    // окрашиваются тем же, чем нарисован ваш знак.
+    const own = ownCol || (bv==='X' ? t.x : t.o);
+    const r = { boardExtra:{}, cellStyleExtra:{}, showGlyph:false, showStrike:false, showCorner:false, showSeal:false,
+      glyphStyle:{}, strikeStyle:{}, cornerStyle:{}, sealStyle:{}, hideMarks:false,
+      shapeOuter:null, shapeInner:null };
+    if(!bv) return r;
+    if(bv==='-'){ r.boardExtra = { opacity:.3 }; return r; }
+    const glyph = (opts) => Object.assign({ position:'absolute', inset:0, display:'grid', placeItems:'center', pointerEvents:'none',
+      fontFamily:t.markFont, fontWeight:t.markW, lineHeight:1, zIndex:3 }, opts);
+
+    if(mode==='glyph'){
+      r.boardExtra = { background:own+'12' };
+      r.cellStyleExtra = { opacity:.25 };
+      r.showGlyph = true;
+      r.glyphStyle = glyph({ opacity:.9 });
+      const f = skin(bv==='X', '52%', false);
+      r.shapeOuter = f.outer; r.shapeInner = f.inner;
+    }
+    if(mode==='invert'){
+      r.boardExtra = { background:own };
+      r.cellStyleExtra = { opacity:0 };
+      r.showGlyph = true;
+      r.glyphStyle = glyph({});
+      const f = skin(bv==='X', '48%', true);
+      r.shapeOuter = f.outer; r.shapeInner = f.inner;
+    }
+    if(mode==='seal'){
+      r.boardExtra = { background:own+'0d' };
+      r.cellStyleExtra = { opacity:.22 };
+      r.showSeal = true;
+      r.sealStyle = { position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)', width:'54%', aspectRatio:'1',
+        borderRadius:'50%', border:'1.5px solid '+own, display:'grid', placeItems:'center',
+        background:t.bg, pointerEvents:'none', zIndex:3 };
+      const f = skin(bv==='X', '52%', false);
+      r.shapeOuter = f.outer; r.shapeInner = f.inner;
+    }
+    if(mode==='dots'){
+      r.boardExtra = { background:'transparent' };
+      r.cellStyleExtra = { background:'transparent', color:'transparent', boxShadow:'inset 0 0 0 3px '+own, borderRadius:'50%', transform:'scale(.42)' };
+      r.showCorner = true;
+      r.cornerStyle = { position:'absolute', top:'50%', left:'50%', transform:'translate(-50%,-50%)',
+        width:'34%', aspectRatio:'1', display:'grid', placeItems:'center',
+        background:t.bg, pointerEvents:'none', zIndex:3 };
+      const f = skin(bv==='X', '100%', false);
+      r.shapeOuter = f.outer; r.shapeInner = f.inner;
+    }
+    if(mode==='strike'){
+      r.boardExtra = { background:own+'0d' };
+      r.cellStyleExtra = { opacity:.7 };
+      r.showStrike = true;
+      r.strikeStyle = this.strikeStyle(t, li, own);
+    }
+    if(mode==='corner'){
+      r.boardExtra = { background:own+'0f', boxShadow:'inset 0 0 0 1px '+own+'44' };
+      r.cellStyleExtra = { opacity:.5 };
+      r.showCorner = true;
+      r.cornerStyle = { position:'absolute', top:'-1px', right:'-1px', width:'20px', height:'20px', display:'grid', placeItems:'center',
+        background:own, borderRadius:'0 '+t.radius+' 0 '+t.radius, pointerEvents:'none', zIndex:3 };
+      const f = skin(bv==='X', '58%', true);
+      r.shapeOuter = f.outer; r.shapeInner = f.inner;
+    }
+    return r;
+  }
+
+  boardStyle(t, live, bv, li){
+    const o = { position:'relative', display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:t.gapCell,
+      padding:'2px', borderRadius:t.radius, background:'transparent', border:'none',
+      transition:'background 120ms, box-shadow 120ms' };
+    if(!bv && live){
+      if(t.active==='wash') o.background = t.accent+'14';
+      if(t.active==='ring') o.boxShadow = 'inset 0 0 0 1px '+t.accent;
+      if(t.active==='fill') o.background = t.accent+'20';
+    }
+    return o;
+  }
+
+  cellStyle(t, v, clickable, size){
+    return { display:'flex', alignItems:'center', justifyContent:'center', aspectRatio:'1', padding:0, border:'none',
+      minWidth:0, minHeight:0, overflow:'hidden',
+      cursor: clickable?'pointer':'default', background:t.cell,
+      borderRadius: t.radius==='14px' ? '6px' : t.radius==='10px' ? '5px' : t.radius==='0px' ? '0' : '3px',
+      fontFamily:t.markFont, fontWeight:t.markW, fontSize:(size||t.markSize)+'px', lineHeight:1,
+      color: v==='X'?t.x : v==='O'?t.o : 'transparent', transition:'background 120ms, opacity 120ms' };
+  }
+
+  styles(t){
+    const caps = t.caps?'uppercase':'none';
+    // Текст на акцентной плашке: чёрный годится только для светлых акцентов.
+    // Считаем яркость и берём тот, что читается.
+    const onAcc = (function(){
+      const L=(h)=>{ h=String(h).replace('#','');
+        const v=[0,2,4].map(i=>parseInt(h.substr(i,2),16)/255)
+          .map(z=>z<=0.03928?z/12.92:Math.pow((z+0.055)/1.055,2.4));
+        return 0.2126*v[0]+0.7152*v[1]+0.0722*v[2]; };
+      const cr=(a,b)=>{const x=L(a),y=L(b);return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);};
+      return cr('#0c0c0e',t.accent) >= cr('#ffffff',t.accent) ? '#0c0c0e' : '#ffffff';
+    })();
+    const lbl = (size,col)=>({ fontFamily:t.mono, fontSize:size||'10px', letterSpacing:'.12em', textTransform:'uppercase', color:col||t.soft });
+    const r = t.radius==='0px'?'0':'3px';
+    return {
+      page:{ minHeight:'100vh', background:'#0c0c0e', color:'#e8e8ea', fontFamily:"'Manrope', sans-serif", paddingBottom:'80px' },
+      bar:{ position:'sticky', top:0, zIndex:30, background:'#0c0c0e', borderBottom:'1px solid #1c1c20', padding:'12px 20px' },
+      barTitle:{ fontFamily:"'IBM Plex Mono', monospace", fontSize:'10px', letterSpacing:'.2em', color:'#8a8a93', marginBottom:'10px' },
+      barTabs:{ display:'flex', flexWrap:'wrap', gap:'6px' },
+      barRow:{ display:'flex', alignItems:'center', gap:'10px', marginTop:'8px', flexWrap:'wrap' },
+      barKey:{ fontFamily:"'IBM Plex Mono', monospace", fontSize:'9px', letterSpacing:'.18em', textTransform:'uppercase', color:'#83838d', minWidth:'52px' },
+      doctrine:{ maxWidth:'1440px', margin:'0 auto', padding:'28px 20px 4px' },
+      docTitle:{ fontFamily:"'IBM Plex Mono', monospace", fontSize:'10px', letterSpacing:'.2em', textTransform:'uppercase', color:'#8a8a93', marginBottom:'12px' },
+      docList:{ listStyle:'none', margin:0, padding:0, display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(250px,1fr))', gap:'14px' },
+      docItem:{ fontSize:'13px', lineHeight:1.6, color:'#95959e', textWrap:'pretty', borderTop:'1px solid #22222a', paddingTop:'10px' },
+      docStrong:{ display:'block', color:'#f0f0f3', fontWeight:600, fontSize:'13px', marginBottom:'3px' },
+      briefBlock:{ maxWidth:'1440px', margin:'0 auto', padding:'26px 20px 0' },
+      briefName:{ fontFamily:"'Archivo', sans-serif", fontWeight:700, fontSize:'24px', letterSpacing:'.02em', color:t.accent },
+      briefText:{ maxWidth:'76ch', margin:'8px 0 0', fontSize:'14px', lineHeight:1.65, color:'#9a9aa3', textWrap:'pretty' },
+      axesRow:{ display:'flex', flexWrap:'wrap', gap:'6px', marginTop:'14px' },
+      axis:{ display:'flex', gap:'6px', fontFamily:"'IBM Plex Mono', monospace", fontSize:'10px', letterSpacing:'.06em', color:'#8e8e97', border:'1px solid #24242c', padding:'5px 9px' },
+      axisWon:{ display:'flex', gap:'6px', fontFamily:"'IBM Plex Mono', monospace", fontSize:'10px', letterSpacing:'.06em', color:onAcc, background:t.accent, padding:'5px 9px' },
+      axisK:{ opacity:1, marginRight:'2px' },
+      screens:{ maxWidth:'1440px', margin:'0 auto', padding:'22px 20px 0', display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(330px,1fr))', gap:'22px', alignItems:'start' },
+      col:{ display:'flex', flexDirection:'column', gap:'8px' },
+      colWide:{ display:'flex', flexDirection:'column', gap:'8px', gridColumn:'1 / -1' },
+      cap:{ fontFamily:"'IBM Plex Mono', monospace", fontSize:'10px', letterSpacing:'.18em', textTransform:'uppercase', color:'#7f7f89' },
+      phone:{ width:'100%', maxWidth:'390px', minHeight:'820px', position:'relative', display:'flex', flexDirection:'column',
+        background:t.bg, color:t.ink, fontFamily:t.body, border:'1px solid #23232a',
+        borderRadius: t.radius==='14px' ? '26px' : t.radius==='10px' ? '20px' : '4px', overflow:'hidden' },
+      phoneInner:{ flex:'1', display:'flex', flexDirection:'column', gap:'12px', padding:'18px 16px 16px', minHeight:0 },
+
+      matchHead:{ display:'flex', alignItems:'center', gap:'10px' },
+      side:{ display:'flex', alignItems:'center', gap:'8px', flex:1, minWidth:0 },
+      sideRight:{ display:'flex', alignItems:'center', gap:'8px', flex:1, minWidth:0, justifyContent:'flex-end' },
+      markSmX:{ fontFamily:t.markFont, fontWeight:t.markW, fontSize:'20px', color:t.x, lineHeight:1 },
+      markSmO:{ fontFamily:t.markFont, fontWeight:t.markW, fontSize:'20px', color:t.o, lineHeight:1 },
+      sideName:{ fontFamily:t.display, fontSize:'13px', fontWeight:500, letterSpacing:t.ls, color:t.ink, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' },
+      // Текст статуса меняет длину («Ваш ход» → «Ход Марины · Только левое
+      // верхнее поле») и раньше перескакивал на две строки, сдвигая доску.
+      // Фиксируем высоту под два ряда — доска стоит на месте всю партию.
+      statusRow:{ display:'flex', flexDirection:'column', gap:'2px', minHeight:'52px', justifyContent:'center' },
+      statusText:{ fontFamily:t.display, fontSize:'19px', fontWeight:600, letterSpacing:t.ls, textTransform:caps, color:t.ink },
+      statusHint:{ fontFamily:t.mono, fontSize:'11px', color:t.soft },
+
+      bigGrid:{ position:'relative', display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:t.gapBig, width:'100%', aspectRatio:'1', userSelect:'none' },
+
+      footBar:{ display:'flex', gap:'8px', marginTop:'auto', paddingTop:'12px', borderTop:'1px solid '+t.line },
+      btnQuiet:{ flex:'0 0 auto', minHeight:'46px', padding:'0 18px', cursor:'pointer', fontFamily:t.display, fontSize:'13px', fontWeight:500,
+        letterSpacing:t.ls, color:t.soft, background:'transparent', border:'1px solid '+t.line, borderRadius:t.radius },
+      btnQuietHover:{ color:t.ink, borderColor:t.lineHi },
+      btnMain:{ flex:1, minHeight:'46px', cursor:'pointer', fontFamily:t.display, fontSize:'13px', fontWeight:600, letterSpacing:t.ls,
+        color:t.bg, background:t.ink, border:'1px solid '+t.ink, borderRadius:t.radius },
+      btnMainHover:{ opacity:.86 },
+
+      lobbyTopRow:{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:'8px', paddingTop:'6px' },
+      gearBtn:{ minHeight:'40px', padding:'0 12px', cursor:'pointer', fontFamily:t.mono, fontSize:'9px', letterSpacing:'.1em', textTransform:'uppercase',
+        color:t.soft, background:'transparent', border:'1px solid '+t.line, borderRadius:r },
+      gearBtnHover:{ color:t.ink, borderColor:t.lineHi },
+      eyebrow:Object.assign({}, lbl('10px'), { display:'block', marginBottom:'6px' }),
+      lobbyTitle:{ fontFamily:t.display, fontSize:'30px', fontWeight:600, lineHeight:1.12, letterSpacing:t.ls, whiteSpace:'pre-line', textTransform:caps, color:t.ink },
+
+      ratingCard:{ display:'flex', flexDirection:'column', gap:'10px', padding:'16px', marginTop:'6px', cursor:'pointer',
+        background:t.card, border:'1px solid '+t.line, borderRadius:t.radius, transition:'border-color 120ms' },
+      ratingCardHover:{ borderColor:t.lineHi },
+      ratingCardStatic:{ display:'flex', flexDirection:'column', gap:'10px', padding:'16px',
+        background:t.card, border:'1px solid '+t.line, borderRadius:t.radius },
+      cardLinkRow:{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:'8px',
+        marginTop:'2px', paddingTop:'10px', borderTop:'1px solid '+t.line },
+      cardLink:{ fontFamily:t.display, fontSize:'13px', fontWeight:500, letterSpacing:t.ls, color:t.ink },
+      cardLinkArrow:{ fontFamily:t.mono, fontSize:'13px', color:t.accent },
+      settingsCard:{ display:'flex', flexDirection:'column', gap:'18px', padding:'16px',
+        background:t.card, border:'1px solid '+t.line, borderRadius:t.radius },
+      ratingHeadRow:{ display:'flex', alignItems:'baseline', gap:'8px', flexWrap:'wrap' },
+      ratingBig:{ fontFamily:t.display, fontSize:'36px', fontWeight:600, lineHeight:1, letterSpacing:'-.02em', color:t.ink },
+      ratingSuffix:{ fontFamily:t.mono, fontSize:'12px', color:t.accent },
+      segRow:{ display:'flex', gap:'4px' },
+      barsRow:{ display:'flex', alignItems:'flex-end', gap:'4px', height:'46px' },
+      ringWrap:{ display:'flex', alignItems:'center', gap:'14px' },
+      ringHole:{ position:'absolute', inset:'7px', borderRadius:'50%', background:t.card, display:'grid', placeItems:'center',
+        fontFamily:t.mono, fontSize:'14px', color:t.ink },
+      ringSide:{ flex:1, fontSize:'12px', lineHeight:1.5, color:t.soft },
+      bandWrap:{ display:'flex', flexDirection:'column', gap:'5px' },
+      bandTrack:{ position:'relative', height:'10px', background:t.cell, borderRadius:t.radius==='0px'?'0':'5px', overflow:'hidden' },
+      bandScale:{ display:'flex', justifyContent:'space-between', fontFamily:t.mono, fontSize:'10px', color:t.soft },
+      ladderWrap:{ display:'flex', flexDirection:'column' },
+      ttl:{ fontFamily:t.mono, fontSize:'11px', lineHeight:1.5, color:t.soft },
+
+      lobbyActions:{ display:'flex', flexDirection:'column', gap:'8px', marginTop:'14px' },
+      btnBig:{ minHeight:'54px', cursor:'pointer', fontFamily:t.display, fontSize:'16px', fontWeight:600, letterSpacing:t.ls,
+        color:t.bg, background:t.ink, border:'none', borderRadius:t.radius, textTransform:caps },
+      btnBigHover:{ opacity:.88 },
+      btnRow:{ minHeight:'48px', cursor:'pointer', fontFamily:t.display, fontSize:'14px', fontWeight:500, letterSpacing:t.ls,
+        color:t.ink, background:'transparent', border:'1px solid '+t.line, borderRadius:t.radius, textAlign:'left', padding:'0 16px' },
+      btnRowHover:{ borderColor:t.lineHi, background:t.card },
+      inviteBlock:{ marginTop:'auto', paddingTop:'14px', borderTop:'1px solid '+t.line },
+      codeRow:{ display:'flex', alignItems:'baseline', gap:'10px' },
+      code:{ fontFamily:t.mono, fontSize:'20px', letterSpacing:'.24em', color:t.ink },
+
+      settingsOverlay:{ position:'absolute', inset:0, background:t.bg, display:'flex', flexDirection:'column', gap:'14px',
+        padding:'18px 16px 16px', zIndex:20 },
+      settingsHead:{ display:'flex', alignItems:'center', justifyContent:'space-between' },
+      settingsTitle:{ fontFamily:t.display, fontSize:'19px', fontWeight:600, letterSpacing:t.ls, textTransform:caps, color:t.ink },
+      closeBtn:{ width:'32px', height:'32px', cursor:'pointer', fontSize:'13px', color:t.soft, background:'transparent', border:'1px solid '+t.line, borderRadius:r },
+      closeBtnHover:{ color:t.ink, borderColor:t.lineHi },
+      settingsScroll:{ display:'flex', flexDirection:'column', gap:'18px', overflow:'auto', flex:1, minHeight:0 },
+      setGroup:{ display:'flex', flexDirection:'column', gap:'10px' },
+      themeGrid:{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'6px' },
+      toggleRow:{ display:'flex', alignItems:'center', justifyContent:'space-between' },
+      toggleLbl:{ fontFamily:t.body, fontSize:'13px', color:t.ink },
+      segCtrl:{ display:'flex', gap:'4px' },
+      sliderHeadRow:{ display:'flex', alignItems:'baseline', justifyContent:'space-between' },
+      sliderVal:{ fontFamily:t.mono, fontSize:'11px', color:t.accent },
+      slider:{ width:'100%', margin:0, minWidth:0, accentColor:t.accent },
+      logoutBtn:{ minHeight:'46px', cursor:'pointer', fontFamily:t.body, fontSize:'13px', color:t.soft, background:'transparent',
+        border:'1px solid '+t.line, borderRadius:t.radius },
+      logoutBtnHover:{ color:t.ink, borderColor:t.lineHi },
+
+      resultBlock:{ paddingTop:'6px' },
+      resultWord:{ fontFamily:t.display, fontSize:'32px', fontWeight:600, letterSpacing:t.ls, lineHeight:1.1, textTransform:caps, color:t.ink },
+      placeRow:{ display:'flex', alignItems:'baseline', gap:'8px', marginTop:'10px' },
+      placeNum:{ fontFamily:t.mono, fontSize:'18px', color:t.ink },
+      placeArrow:{ fontFamily:t.mono, fontSize:'14px', color:t.soft },
+      placeDelta:{ fontFamily:t.mono, fontSize:'11px', color:t.bg, background:t.accent, padding:'2px 7px', borderRadius:r },
+      placeLbl:Object.assign({}, lbl('10px'), { marginTop:'4px' }),
+
+      resultExtra:{ display:'flex', flexDirection:'column', gap:'10px', marginTop:'14px', paddingTop:'14px', borderTop:'1px solid '+t.line },
+      variantHead:{ display:'flex', gap:'4px' },
+      wonLabName:{ fontSize:'12px', lineHeight:1.5, color:t.soft, margin:0 },
+      labGrid:{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'12px' },
+      labItem:{ display:'flex', flexDirection:'column', gap:'6px' },
+      labLbl:{ fontFamily:t.mono, fontSize:'9px', letterSpacing:'.06em', textTransform:'uppercase', color:t.soft },
+
+      varCard:{ display:'flex', flexDirection:'column', gap:'10px', padding:'14px', background:t.card, border:'1px solid '+t.line, borderRadius:t.radius },
+      oppRow:{ display:'flex', alignItems:'center', gap:'10px' },
+      oppMark:{ fontFamily:t.markFont, fontWeight:t.markW, fontSize:'28px', color:t.o, lineHeight:1 },
+      oppInfo:{ display:'flex', flexDirection:'column', gap:'2px' },
+      oppName:{ fontFamily:t.display, fontSize:'14px', fontWeight:600, letterSpacing:t.ls, color:t.ink },
+      oppRecord:{ fontFamily:t.mono, fontSize:'11px', color:t.soft },
+      varBtnRow:{ display:'flex', flexDirection:'column', gap:'8px' },
+      statGrid:{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'8px' },
+      statTile:{ display:'flex', flexDirection:'column', alignItems:'center', gap:'4px', textAlign:'center', padding:'12px 6px',
+        border:'1px solid '+t.line, borderRadius:t.radius },
+      statVal:{ fontFamily:t.display, fontSize:'18px', fontWeight:600, color:t.ink },
+      statLbl:{ fontFamily:t.mono, fontSize:'9px', letterSpacing:'.04em', textTransform:'uppercase', color:t.soft },
+      streakLine:{ fontFamily:t.display, fontSize:'16px', fontWeight:600, color:t.ink },
+      recapWrap:{ display:'flex', flexDirection:'column', gap:'8px', alignItems:'flex-start' },
+      recapGrid:{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'4px', width:'96px', aspectRatio:'1' },
+
+      listHead:Object.assign({}, lbl('10px'), { display:'flex', justifyContent:'space-between', marginTop:'4px', paddingBottom:'6px', borderBottom:'1px solid '+t.lineHi }),
+      list:{ display:'flex', flexDirection:'column' },
+      who:{ flex:1, fontFamily:t.display, fontSize:'14px', fontWeight:500, letterSpacing:t.ls, color:t.ink },
+      wl:{ fontFamily:t.mono, fontSize:'10px', color:t.soft },
+      r:{ fontFamily:t.mono, fontSize:'12px', color:t.ink, minWidth:'74px', textAlign:'right' },
+
+      specPanel:{ background:t.bg, color:t.ink, border:'1px solid #23232a', borderRadius:'4px', padding:'20px',
+        display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(280px,1fr))', gap:'24px', fontFamily:t.body },
+      specGroup:{ display:'flex', flexDirection:'column', gap:'10px' },
+      stateRow:{ display:'flex', gap:'10px', flexWrap:'wrap' },
+      stateItem:{ display:'flex', flexDirection:'column', gap:'5px', alignItems:'center', width:'58px' },
+      stateLbl:Object.assign({}, lbl('9px'), { letterSpacing:'.04em', textAlign:'center', lineHeight:1.3 }),
+      swRow:{ display:'flex', gap:'6px', flexWrap:'wrap' },
+      sw:{ width:'68px', border:'1px solid '+t.line, borderRadius:t.radius==='14px'?'8px':'2px', overflow:'hidden' },
+      swLbl:Object.assign({}, lbl('8px'), { display:'block', padding:'4px 5px', letterSpacing:'.04em' }),
+      typeRow:{ display:'flex', alignItems:'baseline', gap:'12px', paddingBottom:'8px', borderBottom:'1px solid '+t.line },
+      typeRowL:{ display:'flex', alignItems:'center', gap:'12px' },
+      typeLbl:Object.assign({}, lbl('9px'), { flex:'0 0 54px' }),
+      sampleD:{ fontFamily:t.display, fontSize:'20px', fontWeight:600, letterSpacing:t.ls, textTransform:caps },
+      sampleB:{ fontFamily:t.body, fontSize:'14px' },
+      sampleMarks:{ display:'flex', gap:'16px', alignItems:'center' },
+      markBigX:{ fontFamily:t.markFont, fontWeight:t.markW, fontSize:'34px', color:t.x, lineHeight:1 },
+      markBigO:{ fontFamily:t.markFont, fontWeight:t.markW, fontSize:'34px', color:t.o, lineHeight:1 },
+      ruleList:{ listStyle:'none', margin:0, padding:0, display:'flex', flexDirection:'column', gap:'6px' },
+      ruleItem:{ fontFamily:t.mono, fontSize:'11px', color:t.soft, paddingLeft:'12px', borderLeft:'1px solid '+t.lineHi, lineHeight:1.4 },
+      streakStrip:{ padding:'12px 14px', border:'1px solid '+t.line, borderRadius:r, marginBottom:'12px', background:t.card },
+      streakTop:{ display:'flex', alignItems:'baseline', gap:'8px' },
+      streakNum:{ fontFamily:t.display, fontSize:'26px', fontWeight:700, lineHeight:1, color:t.accent, letterSpacing:t.ls },
+      streakWord:{ fontSize:'13px', fontWeight:500, color:t.ink },
+      streakBest:{ marginLeft:'auto', fontFamily:t.mono, fontSize:'10px', letterSpacing:'.1em', textTransform:'uppercase', color:t.soft },
+      streakTrack:{ display:'flex', gap:'2px', height:'4px', marginTop:'10px' },
+      streakNext:{ fontSize:'11px', color:t.soft, marginTop:'8px', lineHeight:1.4 },
+      playerRow:{ display:'flex', alignItems:'center', gap:'9px', marginBottom:'10px' },
+      sparkCtl:{ display:'flex', alignItems:'center', gap:'4px', marginBottom:'10px' },
+      sparkCtlLbl:{ fontFamily:t.mono, fontSize:'9px', letterSpacing:'.12em', textTransform:'uppercase', color:t.soft, marginRight:'4px' },
+      // Колонка живёт на тёмном фоне кита, а красится цветами темы.
+      // Без собственной подложки чёрный ink ложился на чёрное шасси.
+      themedPanel:{ background:t.bg, border:'1px solid '+t.line, borderRadius:r, padding:'16px' },
+      skinStage:{ display:'flex', alignItems:'center', justifyContent:'center', height:'130px',
+        border:'1px solid '+t.line, borderRadius:r, background:t.card, marginBottom:'14px' },
+      shapeGrid:{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:'5px', margin:'6px 0 14px' },
+      palGrid:{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:'5px', margin:'6px 0 14px' },
+      fxList:{ marginTop:'6px' },
+      badgeBox:{ border:'1px solid '+t.line, borderRadius:r, background:t.card, padding:'2px 14px 8px' },
+      badgeRow:{ display:'flex', gap:'4px', marginLeft:'auto' },
+      wardCtl:{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px' },
+      wardStep:{ fontFamily:t.mono, fontSize:'13px', width:'30px', height:'30px', cursor:'pointer',
+        color:t.ink, background:'transparent', border:'1px solid '+t.lineHi, borderRadius:r },
+      wardStepLbl:{ fontFamily:t.mono, fontSize:'10px', letterSpacing:'.12em', textTransform:'uppercase', color:t.soft },
+      wardTabs:{ display:'flex', gap:'4px', marginBottom:'10px' },
+      wardList:{ display:'block' },
+      giftStage:{ border:'1px solid '+t.line, borderRadius:r, background:t.card, padding:'0 0 16px', overflow:'hidden' },
+      giftMeta:{ padding:'0 16px' },
+      giftName:{ fontFamily:t.display, fontSize:'19px', fontWeight:600, color:t.ink, letterSpacing:t.ls, marginTop:'4px' },
+      giftDesc:{ fontSize:'12px', lineHeight:1.5, color:t.soft, marginTop:'4px', textWrap:'pretty' },
+      giftGrid:{ display:'grid', gridTemplateColumns:'repeat(10,1fr)', gap:'4px', marginTop:'12px' },
+      giftLegend:{ display:'flex', justifyContent:'space-between', marginTop:'10px', fontFamily:t.mono, fontSize:'9px', letterSpacing:'.12em', textTransform:'uppercase' },
+      giftLegendOn:{ color:t.accent },
+      giftLegendOff:{ color:t.soft },
+      qsPicker:{ display:'flex', flexWrap:'wrap', gap:'4px', marginBottom:'2px',
+        background:t.bg, border:'1px solid '+t.line, borderRadius:r, padding:'8px' },
+      // мелкие служебные кнопки кита — не ниже 30px, чтобы не мазать мимо
+      minTap:{ minHeight:'30px' },
+      codeStage:{ flex:'1', display:'flex', flexDirection:'column', justifyContent:'center', gap:'16px', padding:'24px 0' },
+      codeSlots:{ display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:'6px' },
+      qsFoot:{ marginTop:'auto', display:'flex', flexDirection:'column', gap:'8px', paddingTop:'14px' },
+      qsMeter:{ display:'flex', gap:'3px', height:'3px' },
+      qsMeterLbl:{ fontFamily:t.mono, fontSize:'9px', letterSpacing:'.14em', textTransform:'uppercase', color:t.soft }
+    };
+  }
+
+  buildRating(t, canon){
+    const cfg = RATING[canon] || RATING.confidence;
+    const delta = cfg.placeFrom - cfg.placeTo;
+    const r = { canonName:cfg.canonName, label:cfg.label, big:cfg.big, suffix:cfg.suffix, note:cfg.note,
+      tableHead:cfg.tableHead, tableUnit:cfg.tableUnit,
+      placeFrom:cfg.placeFrom, placeTo:cfg.placeTo, placeDelta:(delta>=0?'+':'')+delta,
+      isSegs:false, isBars:false, isRing:false, isBand:false, isLadder:false, segs:[], bars:[], ladder:[] };
+    if(cfg.kind==='segs'){
+      r.isSegs = true;
+      const arr=[]; for(let i=0;i<cfg.segsTotal;i++){
+        arr.push({ style:{ flex:1, height:'8px', borderRadius:t.radius==='0px'?'0':'4px',
+          background: i<cfg.segsFill ? t.accent : t.cell, display:'block' } }); }
+      r.segs = arr;
+    }
+    if(cfg.kind==='bars'){
+      r.isBars = true;
+      r.bars = cfg.bars.map((h,i)=>({ style:{ flex:1, height:h+'%', display:'block',
+        background: i===cfg.bars.length-1 ? t.accent : t.accent+'44',
+        borderRadius:t.radius==='0px'?'0':'2px' } }));
+    }
+    if(cfg.kind==='ring'){
+      r.isRing = true; r.ringText = cfg.ringText; r.ringSide = cfg.ringSide;
+      const frac = (parseFloat(cfg.big) || 0) / 100;
+      r.ringStyle = { position:'relative', width:'72px', height:'72px', flex:'0 0 72px', borderRadius:'50%',
+        background:'conic-gradient('+t.accent+' 0turn '+frac+'turn, '+t.cell+' '+frac+'turn 1turn)' };
+    }
+    if(cfg.kind==='band'){
+      r.isBand = true; r.bandLo = cfg.bandLo; r.bandHi = cfg.bandHi;
+      r.bandStyle = { position:'absolute', left:'22%', width:'46%', top:0, bottom:0, background:t.accent+'55', display:'block' };
+      r.bandTickStyle = { position:'absolute', left:'45%', top:0, bottom:0, width:'2px', background:t.accent, display:'block' };
+    }
+    if(cfg.kind==='ladder'){
+      r.isLadder = true;
+      r.ladder = [['126  Лена','+4',false],['127  Вы','—',true],['128  Гоша','−3',false]].map(x=>({
+        who:x[0], gap:x[1],
+        style:{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'7px 8px',
+          background: x[2] ? t.accent+'1f' : 'transparent', borderLeft:'2px solid '+(x[2]?t.accent:'transparent') },
+        whoStyle:{ fontFamily:t.mono, fontSize:'12px', color: x[2]?t.ink:t.soft },
+        gapStyle:{ fontFamily:t.mono, fontSize:'11px', color: x[2]?t.accent:t.soft }
+      }));
+    }
+    return r;
+  }
+
+  labBoard(t, bv, li, size){
+    const mk = bv==='X' ? t.markX : t.markO;
+    const look = this.wonLook(t, bv, li, mk);
+    const pattern = bv==='X' ? ['X','O','X','O','X',null,'X',null,'O'] : ['O','X','O','X','O',null,'O',null,'X'];
+    return {
+      boardStyle: Object.assign({ position:'relative', display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:t.gapCell,
+        padding:'2px', borderRadius:t.radius, aspectRatio:'1' }, look.boardExtra),
+      cells: pattern.map(v=>({ val: v==='X'?t.markX : v==='O'?t.markO : '',
+        style: Object.assign(this.cellStyle(t, v, false, size||13), look.cellStyleExtra) })),
+      showGlyph: look.showGlyph, showStrike: look.showStrike, showCorner: look.showCorner, showSeal: look.showSeal,
+      shapeOuter: look.shapeOuter, shapeInner: look.shapeInner,
+      glyphStyle: look.glyphStyle,
+      strikeStyle: look.strikeStyle,
+      cornerStyle: Object.assign({}, look.cornerStyle, t.won==='dots' ? { width:'22%' } : { width:'14px', height:'14px' }),
+      sealStyle: Object.assign({}, look.sealStyle, { fontSize:'15px' }),
+      mark: mk
+    };
+  }
+
+  renderVals(){
+    const st = this.state;
+    // Цвет текста на цветной плашке: сравниваем контраст чёрного и белого
+    // и берём тот, что выше. Порог по яркости ошибается на средних тонах.
+    const bestOn = (bg)=>{
+      const L=(h)=>{ h=String(h).replace('#','');
+        const v=[0,2,4].map(i=>parseInt(h.substr(i,2),16)/255)
+          .map(z=>z<=0.03928?z/12.92:Math.pow((z+0.055)/1.055,2.4));
+        return 0.2126*v[0]+0.7152*v[1]+0.0722*v[2]; };
+      const cr=(a,b)=>{const x=L(a),y=L(b);return (Math.max(x,y)+0.05)/(Math.min(x,y)+0.05);};
+      return cr('#0c0c0e',bg) >= cr('#ffffff',bg) ? '#0c0c0e' : '#ffffff';
+    };
+    const t = T.find(x=>x.id===st.dir) || T[0];
+    const s = this.styles(t);
+    const mk = (v)=> v==='X' ? t.markX : v==='O' ? t.markO : '';
+    const r = t.radius==='0px'?'0':'3px';
+
+    // ── Скин: форма + два цвета + эффекты ───────────────────────────
+    // Устройство взято из Geometry Dash: иконка — главная награда, у неё
+    // два цветовых слота, и открывается она тремя путями (достижение,
+    // покупка, серия). 12 форм × 12 цветов × 12 цветов × блик × след =
+    // 6912 обликов из 1.4 КБ статики. На игрока — 4 байта.
+    // Формы заданы clip-path, а не картинками: ни одного запроса к серверу.
+    const SHAPES = [
+      ['cross',  'Крест',       'polygon(20% 0%,50% 30%,80% 0%,100% 20%,70% 50%,100% 80%,80% 100%,50% 70%,20% 100%,0% 80%,30% 50%,0% 20%)', 0],
+      ['plus',   'Плюс',        'polygon(35% 0%,65% 0%,65% 35%,100% 35%,100% 65%,65% 65%,65% 100%,35% 100%,35% 65%,0% 65%,0% 35%,35% 35%)', 0],
+      ['rhomb',  'Ромб',        'polygon(50% 0%,100% 50%,50% 100%,0% 50%)', 40],
+      ['hex',    'Шестигран',   'polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%)', 40],
+      ['spark',  'Искра',       'polygon(50% 0%,61% 39%,100% 50%,61% 61%,50% 100%,39% 61%,0% 50%,39% 39%)', 120],
+      ['chev',   'Шеврон',      'polygon(50% 0%,100% 45%,100% 100%,50% 55%,0% 100%,0% 45%)', 120],
+      ['glass',  'Часы',        'polygon(10% 0%,90% 0%,55% 50%,90% 100%,10% 100%,45% 50%)', 200],
+      ['arrow',  'Стрела',      'polygon(50% 0%,100% 50%,72% 50%,72% 100%,28% 100%,28% 50%,0% 50%)', 200],
+      ['shard',  'Осколок',     'polygon(50% 0%,100% 35%,80% 100%,20% 100%,0% 35%)', 320],
+      ['star6',  'Шестилучевая','polygon(50% 0%,63% 30%,97% 25%,75% 50%,97% 75%,63% 70%,50% 100%,37% 70%,3% 75%,25% 50%,3% 25%,37% 30%)', 320],
+      ['round',  'Круг',        '', 0],
+      ['seal',   'Клеймо',      'polygon(50% 0%,93% 25%,93% 75%,50% 100%,7% 75%,7% 25%)', 0]
+    ];
+
+    const PALETTE = [
+      ['ink','Основной',t.ink,0], ['acc','Акцент',t.accent,0], ['x','Свой',t.x,0], ['o','Чужой',t.o,0],
+      ['crim','Киноварь','#c8402c',40], ['ochre','Охра','#b3762f',40], ['gold','Золото','#d4af37',80],
+      ['jade','Нефрит','#2e8b74',80], ['ultra','Ультрамарин','#2f4fd8',80], ['plum','Слива','#7a4e8c',160],
+      ['ice','Лёд','#7fb8c8',160], ['soot','Сажа','#2a2a2a',160]
+    ];
+
+    // Значки — за поступки, а не за время. Хранятся битовой маской.
+    const BADGES = [
+      ['nine','◇','Девять','Взять все девять малых полей в одной партии',true],
+      ['clean','▣','Начисто','Победить, не отдав ни одного поля',true],
+      ['bolt','⌁','Молния','Победить быстрее 25 ходов',true],
+      ['diag','⟋','Диагональ','Выиграть по диагонали большого поля',true],
+      ['back','↺','Возврат','Победить, отставая на два поля',false],
+      ['mirror','⧉','Зеркало','Пять раз подряд ответить в то же поле, куда отправили',false],
+      ['owl','☾','Сова','Победа между двумя и пятью утра',true],
+      ['hund','C','Сотня','Сыграть сто партий',false],
+      ['ten','X','Десятка','Десять побед подряд',false],
+      ['cold','❅','Холодный','Победить, ни разу не получив свободный ход',false],
+      ['last','⌾','На флажке','Победить последним возможным ходом',false],
+      ['duel','⚔','Дуэлянт','Пятьдесят партий против одного соперника',false]
+    ];
+
+    const SPARKS = st.sparksVal;
+    const shp = SHAPES.find(x=>x[0]===st.shape) || SHAPES[0];
+    const colA = (PALETTE.find(x=>x[0]===st.colA) || PALETTE[2])[2];
+    const colB = (PALETTE.find(x=>x[0]===st.colB) || PALETTE[1])[2];
+
+
+    const boards = st.boards.map((bv,b)=>{
+      const live = this.playable(b,st) && !st.over;
+      const look = this.wonLook(t, bv, st.wins[b], mk(bv), skinShape, bv==='X' ? colA : t.o);
+      return {
+        style: Object.assign(this.boardStyle(t, live, bv, st.wins[b]), look.boardExtra),
+        mark: mk(bv),
+        showGlyph: look.showGlyph, showStrike: look.showStrike, showCorner: look.showCorner, showSeal: look.showSeal,
+        glyphStyle: look.glyphStyle, strikeStyle: look.strikeStyle, cornerStyle: look.cornerStyle, sealStyle: look.sealStyle,
+        shapeOuter: look.shapeOuter, shapeInner: look.shapeInner, hasShape: !!look.shapeOuter,
+        cells: st.cells[b].map((v,c)=>{
+          const fresh = st.last && st.last.b===b && st.last.c===c;
+          const lk = v ? markPct(v==='X', fresh) : null;
+          return { hasMark: !!v, markOuter: lk?lk.outer:null, markInner: lk?lk.inner:null,
+            disabled: !live || !!v, onClick: this.play(b,c),
+            style: Object.assign(this.cellStyle(t, v, live && !v), bv ? look.cellStyleExtra : {}),
+            hover: (live && !v) ? { background:t.accent+'2e' } : {} };
+        })
+      };
+    });
+
+    // След хода: линия от вашей клетки к полю, куда отправлен соперник.
+    // Не украшение — она отвечает на главный вопрос «куда мне теперь».
+    const trail = (function(){
+      if(!st.trail || SPARKS < 1200 || !st.last || st.forced===null) return { show:false };
+      const cx = b => ((b%3) + 0.5) / 3 * 100, cy = b => ((b/3|0) + 0.5) / 3 * 100;
+      const x1 = cx(st.last.b), y1 = cy(st.last.b), x2 = cx(st.forced), y2 = cy(st.forced);
+      const dx = x2-x1, dy = y2-y1, len = Math.sqrt(dx*dx+dy*dy);
+      if(len < 0.01) return { show:false };
+      return { show:true, style:{ position:'absolute', left:x1+'%', top:y1+'%', width:len+'%', height:'1.5px',
+        background:colA, transformOrigin:'0 50%', opacity:.75, pointerEvents:'none', zIndex:2,
+        transform:'rotate('+(Math.atan2(dy,dx)*180/Math.PI)+'deg)',
+        animation:'gTrail 420ms ease-out' } };
+    })();
+
+    const rows = TOPS[st.canon] || TOPS.confidence;
+    const top = rows.map((rw,i)=>{
+      const me = rw[1]==='Вы';
+      return { rank:rw[0], who:rw[1], r:rw[2], wl:['41·12','28·14','19·11','6·3','9·12','4·9'][i],
+        style:{ display:'flex', alignItems:'baseline', gap:'10px', padding:'11px 0', borderBottom:'1px solid '+t.line,
+          boxShadow: me ? 'inset 2px 0 0 '+t.accent : 'none', paddingLeft: me ? '10px' : '0' },
+        rankStyle:{ fontFamily:t.mono, fontSize:'11px', color: me ? t.accent : t.soft, minWidth:'26px' } };
+    });
+
+    const stateDefs = [
+      { label:'пусто', v:null, live:false },
+      { label:'доступно', v:null, live:true },
+      { label:'ваш знак', v:'X', live:false },
+      { label:'знак соперника', v:'O', live:false },
+      { label:'поле закрыто', v:null, live:false, off:true }
+    ];
+    const states = stateDefs.map(d=>{
+      const base = Object.assign(this.cellStyle(t, d.v, false, 24), { width:'46px', height:'46px' });
+      if(d.live){ base.background = t.accent+'2e'; }
+      if(d.off){ base.opacity = .3; }
+      return { box:base, val:mk(d.v), label:d.label };
+    });
+
+    const swatches = [['bg',t.bg],['card',t.card],['cell',t.cell],['ink',t.ink],['soft',t.soft],['accent',t.accent]]
+      .map(p=>({ label:p[0], bar:{ display:'block', height:'40px', background:p[1], borderBottom:'1px solid '+t.line } }));
+
+    const capX = st.boards.filter(v=>v==='X').length;
+    const capO = st.boards.filter(v=>v==='O').length;
+
+    const rv = st.resultVariant;
+    const RVARS = [ {id:'a',label:'Соперник'}, {id:'b',label:'Разбор'}, {id:'c',label:'Сегодня'}, {id:'d',label:'Путь'} ];
+    const resultTabs = RVARS.map(x=>{
+      const active = x.id===rv;
+      return { label:x.label, onClick:this.setResultVariant(x.id),
+        style:{ flex:1, minHeight:'44px', cursor:'pointer', fontFamily:t.mono, fontSize:'9px', letterSpacing:'.06em', textTransform:'uppercase',
+          color: active ? t.bg : t.soft, background: active ? t.ink : 'transparent', border:'1px solid '+(active?t.ink:t.line), borderRadius:r },
+        hover: active ? {} : { color:t.ink, borderColor:t.lineHi } };
+    });
+
+    const recapPattern = ['X','O','X','O','X','-','O','X','O'];
+    const recap = recapPattern.map(v=>({ style:{ display:'block', aspectRatio:'1', borderRadius:r,
+      background: v==='X' ? t.x+'cc' : v==='O' ? t.o+'cc' : t.line } }));
+
+    const themeSwatches = T.map(x=>{
+      const active = x.id===t.id;
+      return { label:x.name, mark:x.markX, onClick:this.pick(x.id),
+        style:{ display:'flex', flexDirection:'column', alignItems:'center', gap:'4px', padding:'8px 4px', cursor:'pointer',
+          background:x.bg, border: active ? '2px solid '+t.accent : '1px solid '+t.line, borderRadius:r },
+        hover: active ? {} : { borderColor:t.lineHi },
+        markStyle:{ fontFamily:x.markFont, fontWeight:x.markW, fontSize:'16px', color:x.x, lineHeight:1 },
+        // подпись читается на фоне САМОГО свотча, поэтому берёт цвета своей темы
+        nameStyle:{ fontFamily:t.mono, fontSize:'9px', letterSpacing:'.04em', textTransform:'uppercase',
+          color: active ? x.accent : x.ink } };
+    });
+
+    // Каждое состояние соответствует ответу сервера. Текст — на клиенте:
+    // сервер отдаёт код, поэтому перевод не стоит ни байта серверной памяти.
+    const STATES = [
+      { code:'queued', kind:'wait', title:'Ищем соперника', body:'В очереди 30 секунд. Обычно находится быстрее — сейчас играют 12 человек.', action:'Отменить поиск' },
+      { code:'queued · пусто', kind:'wait', title:'Пока никого нет', body:'Очередь пустая. Можно позвать друга по коду — он войдёт сразу, без очереди.', action:'Позвать друга' },
+      { code:'matched · resumed', kind:'ok', title:'Партия восстановлена', body:'Связь вернулась, позиция на месте. Ваш ход, осталось 18 секунд.', action:'' },
+      { code:'disconnect · grace', kind:'wait', title:'Соперник пропал', body:'Ждём возвращения 18 секунд. Если не вернётся, вам засчитают победу.', action:'' },
+      { code:'ws · reconnect', kind:'wait', title:'Связь потеряна', body:'Переподключаемся. Партия сохранена, ходить пока нельзя.', action:'' },
+      { code:'invite_not_found', kind:'err', title:'Код не найден', body:'Проверьте шесть символов. В кодах не бывает нуля, единицы, «I» и «O».', action:'Ввести заново' },
+      { code:'invite_expired', kind:'err', title:'Код устарел', body:'Приглашение живёт 15 минут. Попросите друга создать новое.', action:'Ввести другой код' },
+      { code:'host_offline', kind:'err', title:'Друг вышел', body:'Тот, кто создал комнату, сейчас не в сети. Код сработает, когда он вернётся.', action:'Найти соперника' },
+      { code:'in_game', kind:'err', title:'Вы уже в партии', body:'Сначала закончите текущую — доиграйте или сдайтесь.', action:'Вернуться в партию' },
+      { code:'rate_limited', kind:'err', title:'Слишком быстро', body:'Слишком много действий подряд. Подождите пару секунд.', action:'' },
+      { code:'auth_failed', kind:'err', title:'Вход не удался', body:'Telegram не передал данные профиля. Помогает перезапуск приложения.', action:'Попробовать снова' },
+      { code:'leaderboard · пусто', kind:'empty', title:'Рейтинга пока нет', body:'Таблица заполняется после рейтинговых партий. Ваша может стать первой.', action:'Найти соперника' }
+    ];
+    const serverStates = STATES.map(x=>{
+      const tone = x.kind==='err' ? t.o : x.kind==='ok' ? t.accent : t.soft;
+      return { code:x.code, title:x.title, body:x.body, action:x.action, hasAction: !!x.action,
+        style:{ padding:'12px 13px', marginBottom:'8px', background:t.card, borderRadius:r,
+          border:'1px solid '+t.line, borderLeftWidth:'2px', borderLeftColor:tone },
+        codeStyle:{ fontFamily:t.mono, fontSize:'9px', letterSpacing:'.14em', textTransform:'uppercase', color:tone },
+        actionStyle:{ marginTop:'10px', minHeight:'40px', display:'flex', alignItems:'center', justifyContent:'center',
+          fontSize:'13px', fontWeight:500, color:t.ink, border:'1px solid '+t.lineHi, borderRadius:r, cursor:'pointer' } };
+    });
+
+    // ── Серия побед: 20 подарков ─────────────────────────────────────
+    // Ничего не хранится, кроме самого числа: каждый подарок — чистая
+    // функция от streak. На сервере это u8 + u8 (рекорд) + u8 (щит).
+    // Награды не добавляют декор, а уточняют то, что уже есть на экране:
+    // знак, поле, число, звук. Это единственный способ дать 20 наград
+    // и не сломать «ноль декора».
+
+    function shapeOf(id){ return SHAPES.find(x=>x[0]===id) || SHAPES[0]; }
+
+    // Тот же скин в долях клетки — ширина клетки заранее неизвестна.
+    // Скин соперника фиксированный: облик носят оба, и ваш выбор видят
+    // чужими глазами ровно так же, как вы — их.
+    function markPct(mine, fresh){
+      const opp = { sh: shapeOf('round'), a: t.o, b: t.card };
+      const sh = mine ? shp : opp.sh;
+      const ca = mine ? colA : opp.a, cb = mine ? colB : opp.b;
+      const outer = { position:'relative', width:'58%', aspectRatio:'1', background:ca,
+        clipPath: sh[2] || 'none', borderRadius: sh[0]==='round' ? '50%' : '0' };
+      if(mine && st.glow && SPARKS >= 800) outer.filter = 'drop-shadow(0 0 5px '+ca+'cc)';
+      if(fresh) outer.animation = 'gPlace 260ms cubic-bezier(.2,1.3,.4,1)';
+      const inner = { position:'absolute', left:'26%', top:'26%', width:'48%', height:'48%',
+        background:cb, clipPath: sh[2] || 'none', borderRadius: sh[0]==='round' ? '50%' : '0' };
+      return { outer, inner };
+    }
+
+    // Фигура для взятого поля: тот же скин, но произвольного размера.
+    // invert=true — поле залито цветом владельца, фигура вырезается фоном.
+    function skinShape(mine, size, invert){
+      const sh = mine ? shp : shapeOf('round');
+      let ca = mine ? colA : t.o, cb = mine ? colB : t.card;
+      if(invert){ ca = t.bg; cb = mine ? colA : t.o; }
+      const outer = { position:'relative', width:size, aspectRatio:'1', background:ca,
+        clipPath: sh[2] || 'none', borderRadius: sh[0]==='round' ? '50%' : '0' };
+      if(mine && !invert && st.glow && SPARKS >= 800) outer.filter = 'drop-shadow(0 0 8px '+ca+'aa)';
+      const inner = { position:'absolute', left:'26%', top:'26%', width:'48%', height:'48%',
+        background:cb, clipPath: sh[2] || 'none', borderRadius: sh[0]==='round' ? '50%' : '0' };
+      return { outer, inner };
+    }
+
+    function markLook(size, glow){
+      const outer = { position:'relative', width:size+'px', height:size+'px', flex:'0 0 '+size+'px',
+        background: colA, clipPath: shp[2] || 'none', borderRadius: shp[0]==='round' ? '50%' : '0' };
+      if(glow && st.glow && SPARKS >= 800) outer.filter = 'drop-shadow(0 0 '+Math.round(size/4)+'px '+colA+'aa)';
+      const inner = { position:'absolute', left:'26%', top:'26%', width:'48%', height:'48%',
+        background: colB, clipPath: shp[2] || 'none', borderRadius: shp[0]==='round' ? '50%' : '0' };
+      return { outer, inner };
+    }
+
+    const bigLook = markLook(64, true);
+    const skinPreview = { outer:bigLook.outer, inner:bigLook.inner };
+
+    const shapeGrid = SHAPES.map(x=>{
+      const owned = x[3] <= SPARKS, sel = x[0]===st.shape;
+      const lk = { width:'22px', height:'22px', margin:'0 auto', background: owned ? (sel?colA:t.soft) : t.line,
+        clipPath: x[2] || 'none', borderRadius: x[0]==='round' ? '50%' : '0' };
+      return { onClick: owned ? this.setShape(x[0]) : null, glyphStyle: lk, price: x[3]===0 ? '' : x[3],
+        style:{ padding:'11px 4px 8px', minHeight:'44px', cursor: owned?'pointer':'default', borderRadius:r, textAlign:'center',
+          background: sel ? t.accent+'14' : 'transparent',
+          border:'1px solid '+(sel ? t.accent : t.line), opacity: owned?1:.45 },
+        hover: owned&&!sel ? { borderColor:t.lineHi } : {},
+        priceStyle:{ fontFamily:t.mono, fontSize:'8px', letterSpacing:'.06em', color:t.soft, display:'block', marginTop:'4px' } };
+    });
+
+    function palRow(slot){
+      return PALETTE.map(p=>{
+        const owned = p[3] <= SPARKS, sel = (slot==='A' ? st.colA : st.colB)===p[0];
+        return { onClick: owned ? this.setCol(slot,p[0]) : null,
+          style:{ width:'100%', aspectRatio:'1', cursor: owned?'pointer':'default', borderRadius:r,
+            background:p[2], opacity: owned?1:.3,
+            boxShadow: sel ? '0 0 0 2px '+t.bg+',0 0 0 3px '+t.ink : 'inset 0 0 0 1px rgba(0,0,0,.25)' } };
+      });
+    }
+    const palA = palRow.call(this,'A'), palB = palRow.call(this,'B');
+
+    const badges = BADGES.map(b=>({
+      glyph:b[1], name:b[2], how:b[3], got:b[4],
+      style:{ display:'flex', gap:'9px', alignItems:'flex-start', padding:'8px 0', borderBottom:'1px solid '+t.line, opacity:b[4]?1:.45 },
+      glyphStyle:{ width:'26px', height:'26px', flex:'0 0 26px', display:'flex', alignItems:'center', justifyContent:'center',
+        fontFamily:t.display, fontSize:'14px', borderRadius: t.radius==='0px'?'0':'50%',
+        color: b[4]?t.bg:t.soft, background: b[4]?t.accent:'transparent', border:'1px solid '+(b[4]?t.accent:t.lineHi) },
+      nameStyle:{ fontSize:'13px', fontWeight:600, color:t.ink },
+      howStyle:{ fontSize:'11px', lineHeight:1.4, color:t.soft, marginTop:'1px', textWrap:'pretty' }
+    }));
+
+    const fxRow = [
+      { label:'Блик', on:st.glow, price:800, onClick:this.toggleFx('glow'), got:SPARKS>=800 },
+      { label:'След хода', on:st.trail, price:1200, onClick:this.toggleFx('trail'), got:SPARKS>=1200 }
+    ].map(f=>({ label:f.label, note: f.got ? (f.on?'включён':'выключен') : (f.price+' искр'),
+      onClick: f.got ? f.onClick : null,
+      style:{ display:'flex', justifyContent:'space-between', alignItems:'center', width:'100%',
+        padding:'11px 12px', marginBottom:'6px', cursor:f.got?'pointer':'default', borderRadius:r,
+        background: f.on ? t.accent+'14' : 'transparent',
+        border:'1px solid '+(f.on ? t.accent : t.line), opacity:f.got?1:.45 },
+      labelStyle:{ fontSize:'13px', fontWeight:500, color:t.ink },
+      noteStyle:{ fontFamily:t.mono, fontSize:'9px', letterSpacing:'.1em', textTransform:'uppercase', color: f.on?t.accent:t.soft } }));
+
+    // Пресеты подобраны по порогам цен: 0 — ничего, 140 — дешёвое,
+    // 400 — все формы и цвета, 900 — блик, 2000 — всё вместе со следом.
+    const sparkPresets = [0,140,400,900,2000].map(v=>{
+      const on = v===st.sparksVal;
+      return { label:v, onClick:this.setSparks(v),
+        style:{ flex:1, fontFamily:t.mono, fontSize:'10px', padding:'9px 2px', minHeight:'32px', cursor:'pointer', textAlign:'center',
+          color:on?t.bg:t.soft, background:on?t.ink:'transparent',
+          border:'1px solid '+(on?t.ink:t.line), borderRadius:r },
+        hover: on?{}:{ color:t.ink, borderColor:t.lineHi } };
+    });
+
+    const smallLook = markLook(18, false);
+    const player = {
+      name:'Марат', sparks:SPARKS,
+      markOuter:smallLook.outer, markInner:smallLook.inner,
+      nameStyle:{ fontSize:'17px', fontWeight:600, color:t.ink, letterSpacing:t.ls },
+      badges: BADGES.filter(b=>b[4]).slice(0,3).map(b=>({ glyph:b[1],
+        style:{ width:'19px', height:'19px', display:'flex', alignItems:'center', justifyContent:'center',
+          fontSize:'10px', borderRadius: t.radius==='0px'?'0':'50%', color:t.accent, border:'1px solid '+t.accent+'66' } }))
+    };
+
+    const CUR_STREAK = st.streakVal, BEST_STREAK = 12;
+    const streak = {
+      cur: CUR_STREAK, best: BEST_STREAK,
+      word: CUR_STREAK===1 ? 'победа подряд' : (CUR_STREAK>=2&&CUR_STREAK<=4 ? 'победы подряд' : 'побед подряд'),
+      bestLabel: 'рекорд ' + BEST_STREAK,
+      sparkLabel: SPARKS + ' искр',
+      nextLabel: 'Победа даёт 5 искр, ничья 2, поражение 1. Серия добавляет по искре за шаг.',
+      dots: Array.from({length:20}, (_,i)=>{
+        const on = i < CUR_STREAK, rec = i < BEST_STREAK, mk5 = ((i+1)%5===0);
+        return { style:{ flex:1, display:'block', borderRadius: t.radius==='0px'?'0':'2px',
+          background: on ? t.accent : (rec ? t.accent+'33' : t.cell),
+          boxShadow: mk5 && !on ? 'inset 0 0 0 1px '+t.lineHi : 'none' } };
+      }),
+      minus: this.bumpStreak(-1), plus: this.bumpStreak(1)
+    };
+
+    // ── Состояния сервера ────────────────────────────────────────────
+    // Показываются не карточками, а в том инструменте, где случаются:
+    // всё вокруг партии — на поле, всё про приглашение — на коде.
+    // Ожидание отрисовано волной по девяти полям, обратный отсчёт —
+    // теми же девятью полями как сегментами. Никакой отдельной графики.
+    const MID = [
+      ['X',null,'O',null,'X',null,null,null,'O'],
+      [null,'O',null,'X',null,null,null,'X',null],
+      [null,null,null,null,'O',null,null,null,null],
+      ['O',null,null,null,'X',null,null,null,null],
+      [null,null,'X',null,'O',null,'X',null,null],
+      [null,null,null,null,null,null,null,'O',null],
+      [null,'X',null,null,null,null,null,null,null],
+      [null,null,null,'O',null,'X',null,null,null],
+      [null,null,null,null,null,null,null,null,'X']
+    ];
+    const EMPTY9 = [0,1,2,3,4,5,6,7,8].map(()=>Array(9).fill(null));
+
+    const QS = [
+      { id:'queued', code:'queued', tab:'Очередь', title:'Ищем соперника', hint:'В очереди 0:30',
+        surface:'board', mode:'wave', pos:EMPTY9, opp:'—', oppName:'Соперник не найден',
+        meter:{ fill:4, total:9, label:'сейчас играют 12 человек' }, action:'Отменить поиск' },
+      { id:'empty', code:'queued · пусто', tab:'Пусто', title:'Пока никого нет', hint:'Очередь пустая',
+        surface:'board', mode:'idle', pos:EMPTY9, opp:'—', oppName:'Никого в очереди',
+        meter:{ fill:0, total:9, label:'друг войдёт без очереди' }, action:'Позвать друга', quiet:'Ждать дальше' },
+      { id:'resumed', code:'matched · resumed', tab:'Восстановлена', title:'Партия восстановлена', hint:'Позиция на месте',
+        surface:'board', mode:'live', live:4, pos:MID, opp:'O', oppName:'Марина',
+        meter:{ fill:9, total:9, label:'связь устойчива' } },
+      { id:'grace', code:'disconnect · grace', tab:'Соперник пропал', title:'Соперник пропал', hint:'Ждём 14 секунд',
+        surface:'board', mode:'count', lit:7, pos:MID, opp:'O', oppName:'Марина отключилась',
+        meter:{ fill:7, total:9, label:'не вернётся — победа ваша' }, quiet:'Дождаться' },
+      { id:'reconnect', code:'ws · reconnect', tab:'Нет связи', title:'Связь потеряна', hint:'Переподключаемся',
+        surface:'board', mode:'dim', pos:MID, opp:'O', oppName:'Марина',
+        meter:{ fill:2, total:9, label:'позиция сохранена' } },
+      { id:'not_found', code:'invite_not_found', tab:'Код не найден', title:'Такого кода нет', hint:'Проверьте шесть символов',
+        surface:'code', slots:'K7QM2', bad:true, caption:'В кодах не бывает нуля, единицы, «I» и «O» — их легко спутать.',
+        opp:'—', oppName:'Вход по коду', meter:{ fill:0, total:9, label:'введено 5 из 6' }, action:'Ввести заново' },
+      { id:'expired', code:'invite_expired', tab:'Код устарел', title:'Код устарел', hint:'Приглашение живёт 15 минут',
+        surface:'code', slots:'K7QM2X', bad:true, caption:'Попросите друга создать новое — это одна кнопка в лобби.',
+        opp:'—', oppName:'Вход по коду', meter:{ fill:0, total:9, label:'создан 22 минуты назад' }, action:'Ввести другой код' },
+      { id:'host_offline', code:'host_offline', tab:'Друг вышел', title:'Друг сейчас не в сети', hint:'Код рабочий',
+        surface:'code', slots:'K7QM2X', bad:false, caption:'Сработает, как только он откроет игру. Код действует ещё 9 минут.',
+        opp:'—', oppName:'Вход по коду', meter:{ fill:5, total:9, label:'осталось 9 из 15 минут' }, action:'Найти другого соперника', quiet:'Подождать друга' },
+      { id:'in_game', code:'in_game', tab:'Уже в партии', title:'Вы уже играете', hint:'Партия с Мариной идёт',
+        surface:'board', mode:'live', live:4, pos:MID, opp:'O', oppName:'Марина',
+        meter:{ fill:6, total:9, label:'27-й ход' }, action:'Вернуться в партию', quiet:'Сдаться' },
+      { id:'rate', code:'rate_limited', tab:'Слишком быстро', title:'Слишком много действий', hint:'Пара секунд — и продолжим',
+        surface:'board', mode:'dim', pos:MID, opp:'O', oppName:'Марина',
+        meter:{ fill:1, total:9, label:'лимит восстанавливается' } },
+      { id:'auth', code:'auth_failed', tab:'Вход не удался', title:'Telegram не передал профиль', hint:'Обычно помогает перезапуск',
+        surface:'board', mode:'idle', pos:EMPTY9, opp:'—', oppName:'Гость',
+        meter:{ fill:0, total:9, label:'играть можно и без входа' }, action:'Попробовать снова', quiet:'Играть гостем' }
+    ];
+
+    const qcur = QS.find(x=>x.id===st.qsel) || QS[0];
+    const qsTabs = QS.map(x=>{
+      const on = x.id===st.qsel;
+      return { label:x.tab, onClick:this.pickQs(x.id),
+        style:{ fontFamily:t.mono, fontSize:'9px', letterSpacing:'.1em', textTransform:'uppercase', padding:'8px 9px', minHeight:'32px', cursor:'pointer',
+          color: on ? t.bg : t.soft, background: on ? t.ink : 'transparent',
+          border:'1px solid '+(on ? t.ink : t.line), borderRadius:r },
+        hover: on ? {} : { color:t.ink, borderColor:t.lineHi } };
+    });
+
+    const qBoards = (qcur.pos||EMPTY9).map((row,b)=>{
+      const bs = { position:'relative', display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:t.gapCell,
+        padding:'2px', borderRadius:t.radius, transition:'background 120ms' };
+      let cellOpacity = 1;
+      if(qcur.mode==='wave'){
+        // волна пробегает по девяти полям — очередь, показанная самим полем
+        bs.background = t.accent+'1f';
+        bs.animation = 'dcWave 2.2s ease-in-out infinite';
+        bs.animationDelay = (b*0.14).toFixed(2)+'s';
+      }
+      if(qcur.mode==='idle'){ bs.background = t.cell+'55'; cellOpacity = .5; }
+      if(qcur.mode==='dim'){ cellOpacity = .3; bs.animation='dcHold 2.4s ease-in-out infinite'; }
+      if(qcur.mode==='live'){
+        if(b===qcur.live){ if(t.active==='ring') bs.boxShadow='inset 0 0 0 1px '+t.accent; else bs.background=t.accent+'1a'; }
+      }
+      if(qcur.mode==='count'){
+        // девять полей работают как девять секунд grace-периода
+        bs.background = b < qcur.lit ? t.accent+'22' : 'transparent';
+        cellOpacity = b < qcur.lit ? .8 : .25;
+      }
+      return { style:bs, cells: row.map(v=>({ val: mk(v),
+        style: Object.assign(this.cellStyle(t, v, false, Math.round(t.markSize*0.62)), { opacity:cellOpacity, cursor:'default' }) })) };
+    });
+
+    const slotChars = (qcur.slots||'').split('');
+    const qSlots = [0,1,2,3,4,5].map(i=>{
+      const ch = slotChars[i] || '';
+      const tone = qcur.bad ? t.o : t.accent;
+      return { val: ch,
+        style:{ display:'flex', alignItems:'center', justifyContent:'center', aspectRatio:'1', borderRadius:r,
+          fontFamily:t.mono, fontSize:'22px', fontWeight:500, letterSpacing:0,
+          color: ch ? (qcur.bad ? tone : t.ink) : t.soft,
+          background: ch ? t.cell : 'transparent',
+          border:'1px solid '+(ch ? (qcur.bad ? tone : t.lineHi) : t.line) } };
+    });
+
+    const qMeter = [0,1,2,3,4,5,6,7,8].map(i=>({
+      style:{ flex:1, display:'block', borderRadius: t.radius==='0px'?'0':'2px',
+        background: i < (qcur.meter?qcur.meter.fill:0) ? t.accent : t.cell } }));
+
+    const qs = {
+      code: qcur.code, title: qcur.title, hint: qcur.hint,
+      isBoard: qcur.surface==='board', isCode: qcur.surface==='code',
+      boards: qBoards, slots: qSlots, meter: qMeter,
+      meterLabel: qcur.meter ? qcur.meter.label : '',
+      caption: qcur.caption || '',
+      captionStyle:{ fontSize:'12px', lineHeight:1.5, color:t.soft, textWrap:'pretty', textAlign:'center', maxWidth:'30ch', margin:'0 auto' },
+      oppMark: qcur.opp==='O' ? t.markO : '·',
+      oppName: qcur.oppName,
+      oppMarkStyle:{ fontFamily:t.markFont, fontWeight:t.markW, fontSize:'20px', lineHeight:1,
+        color: qcur.opp==='O' ? t.o : t.soft, opacity: qcur.opp==='O' ? 1 : .6 },
+      oppNameStyle:{ fontSize:'14px', fontWeight:500, color: qcur.opp==='O' ? t.ink : t.soft,
+        overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' },
+      titleStyle:{ fontFamily:t.display, fontSize:'19px', fontWeight:600, letterSpacing:t.ls, color:t.ink },
+      action: qcur.action || '', hasAction: !!qcur.action,
+      quiet: qcur.quiet || '', hasQuiet: !!qcur.quiet
+    };
+
+    const toggleDefs = [ {label:'Звук ходов', key:'sound'}, {label:'Вибрация', key:'vibration'} ];
+    const toggles = toggleDefs.map(x=>{
+      const on = st.settings[x.key];
+      return { label:x.label, onClick:this.toggleSetting(x.key),
+        track:{ position:'relative', width:'52px', height:'32px', borderRadius:'16px', border:'none', cursor:'pointer', padding:0,
+          background: on ? t.accent : t.cell },
+        knob:{ position:'absolute', top:'4px', left: on ? '24px' : '4px', width:'24px', height:'24px', borderRadius:'50%',
+          background: on ? t.bg : t.soft, display:'block', transition:'left 150ms' } };
+    });
+
+    const speedOpts = [['normal','Обычная'],['fast','Быстрая'],['off','Выкл']].map(p=>{
+      const active = st.settings.speed===p[0];
+      return { label:p[1], onClick:this.setSpeed(p[0]),
+        style:{ flex:1, minHeight:'44px', cursor:'pointer', fontFamily:t.mono, fontSize:'9px', letterSpacing:'.04em', textTransform:'uppercase',
+          color: active ? t.bg : t.soft, background: active ? t.ink : 'transparent', border:'1px solid '+(active?t.ink:t.line), borderRadius:r },
+        hover: active ? {} : { color:t.ink, borderColor:t.lineHi } };
+    });
+
+    const langOpts = [['ru','RU'],['en','EN']].map(p=>{
+      const active = st.settings.lang===p[0];
+      return { label:p[1], onClick:this.setLang(p[0]),
+        style:{ flex:1, minHeight:'44px', cursor:'pointer', fontFamily:t.mono, fontSize:'9px', letterSpacing:'.04em', textTransform:'uppercase',
+          color: active ? t.bg : t.soft, background: active ? t.ink : 'transparent', border:'1px solid '+(active?t.ink:t.line), borderRadius:r },
+        hover: active ? {} : { color:t.ink, borderColor:t.lineHi } };
+    });
+
+    return {
+      s, theme:t, boards, top, states, swatches,
+      doctrine: DOCTRINE,
+      rating: this.buildRating(t, st.canon),
+      wonLab: [
+        Object.assign(this.labBoard(t,'X',0), { label:'взято X' }),
+        Object.assign(this.labBoard(t,'O',7), { label:'взято O' }),
+        Object.assign(this.labBoard(t,'X',4), { label:'вертикаль' })
+      ],
+      marks:{ x:t.markX, o:t.markO },
+      axes: [ { k:'знак', v:t.markSize+'px' }, { k:'зазор', v:t.gapBig }, { k:'радиус', v:t.radius } ],
+      rules: t.rules.map(x=>({ t:x })),
+      canonTabs: Object.keys(RATING).map(k=>{
+        const active = k===st.canon;
+        return { label:RATING[k].canonName, onClick:this.pickCanon(k),
+          style:{ fontFamily:"'IBM Plex Mono', monospace", fontSize:'10px', letterSpacing:'.12em', padding:'7px 12px', cursor:'pointer',
+            color: active ? '#0c0c0e' : '#9d9da6', background: active ? '#e8e8ea' : 'transparent',
+            border:'1px solid '+(active ? '#e8e8ea' : '#24242c'), borderRadius:'2px' },
+          hover: active ? {} : { color:'#f2f2f5', borderColor:'#3d3d46' } };
+      }),
+      tabs: T.map(x=>({ label:x.name, onClick:this.pick(x.id),
+        style:{ fontFamily:"'IBM Plex Mono', monospace", fontSize:'10px', letterSpacing:'.12em', padding:'7px 12px', cursor:'pointer',
+          color: x.id===t.id ? bestOn(x.accent) : '#9d9da6', background: x.id===t.id ? x.accent : 'transparent',
+          border:'1px solid '+(x.id===t.id ? x.accent : '#24242c'), borderRadius:'2px' },
+        hover: x.id===t.id ? {} : { color:'#f2f2f5', borderColor:'#3d3d46' } })),
+      statusText: st.over ? (st.over==='-' ? 'Ничья' : 'Победа '+mk(st.over)) : (st.turn==='X' ? 'Ваш ход' : 'Ход Марины'),
+      hintText: st.over ? 'Партия окончена' : (st.forced===null ? 'Любое открытое поле' : 'Только '+POS[st.forced]+' поле'),
+      resultTabs, showVarA: rv==='a', showVarB: rv==='b', showVarC: rv==='c', showVarD: rv==='d',
+      matchStats: [ {val:'27', label:'ходов'}, {val:'6:42', label:'время партии'}, {val:'прав. нижнее', label:'решающее поле'} ],
+      streakText: 'Третья победа сегодня', streakDots:[0,1,2,3,4].map(i=>({ style:{ flex:1, height:'8px', borderRadius:t.radius==='0px'?'0':'4px',
+        background: i<3 ? t.accent : t.cell, display:'block' } })),
+      recap,
+      settingsOpen: st.settingsOpen, ratingOpen: st.ratingOpen,
+      openRating:this.openRating, closeRating:this.closeRating, settings: st.settings, timerLabel: st.settings.timer+' сек',
+      themeSwatches, toggles, speedOpts, langOpts, qs, qsTabs, streak, player,
+      skinPreview, shapeGrid, palA, palB, fxRow, badges, shapeName: shp[1], sparkPresets, trail,
+      openSettings:this.openSettings, closeSettings:this.closeSettings, onTimer:this.onTimer,
+      undo:this.undo, reset:this.reset
+    };
+  }
+}
+
+</script>
+</body>
+</html>
